@@ -1,0 +1,64 @@
+{
+  "name": "mcp-repo-auditor",
+  "version": "1.0.0",
+  "description": "Local MCP server that audits your git changes against the repo's own AI rules (AGENTS.md, CLAUDE.md, .cursorrules, Copilot, Kiro, skills) and returns a compliance table or an HTML report.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-repo-auditor": "dist/index.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "inspect": "npx -y @modelcontextprotocol/inspector node dist/index.js",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-review",
+    "compliance",
+    "cursorrules",
+    "kiro",
+    "agents-md",
+    "git",
+    "claude",
+    "cursor",
+    "copilot",
+    "mcp-server",
+    "ai-rules",
+    "lint"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "fast-glob": "^3.3.3",
+    "picomatch": "^4.0.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/picomatch": "^4.0.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikhilgupta15/mcp-repo-auditor.git"
+  },
+  "homepage": "https://github.com/nikhilgupta15/mcp-repo-auditor#readme",
+  "bugs": {
+    "url": "https://github.com/nikhilgupta15/mcp-repo-auditor/issues"
+  }
+}
