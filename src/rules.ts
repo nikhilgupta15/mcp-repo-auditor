@@ -365,15 +365,36 @@ function splitSentences(paragraph: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Sections that describe the project (how to build it, where things live)
+ * rather than constrain the code. Their bullets are mostly reference notes
+ * such as "`npm test` - run the tests" or "`src/api/` holds the handlers".
+ */
+const DESCRIPTIVE_SECTION =
+  /\b(commands?|scripts|(project|directory|folder|file|repo|repository|codebase) (structure|layout|overview|organi[sz]ation)|architecture|overview|tech(nology)? stack|getting started|quick ?start|set ?up|installation|installing|prerequisites|(key|important) files|entry points?|links|resources|references|background|introduction)\b/i;
+/** ...unless the heading says the section holds rules ("Architecture rules"). */
+const PRESCRIPTIVE_SECTION = /\b(rules?|guidelines?|conventions?|standards?|principles|constraints|requirements|practices|style|dos?|don'?ts?)\b/i;
+
+/** Wording that marks a reference-looking bullet as a rule after all. */
+const RULE_WORDING = /\b(not|no|cannot|can't|forbidden|banned|allowed|needs?|all|every|instead)\b/i;
+
+/** Directive language outside code spans: the "use" in "`use-client`" does not make a rule. */
+function hasRuleWording(text: string): boolean {
+  const prose = text.replace(/`[^`]*`/g, " ");
+  return DIRECTIVE.test(prose) || RULE_WORDING.test(prose);
+}
+
+type BulletCandidate = Candidate & { dropped?: boolean; reference?: boolean };
+
 interface BulletFrame {
   indent: number;
   text: string;
-  candidate: Candidate & { dropped?: boolean };
+  candidate: BulletCandidate;
 }
 
 /** Extracts atomic rule candidates from Markdown / plain text. */
 export function extractMarkdownRules(body: string, lineOffset: number, strict: boolean): Candidate[] {
-  const out: Array<Candidate & { dropped?: boolean }> = [];
+  const out: BulletCandidate[] = [];
   const lines = body.split(/\r?\n/);
   const headings: Array<{ level: number; text: string }> = [];
   const bulletStack: BulletFrame[] = [];
@@ -383,6 +404,15 @@ export function extractMarkdownRules(body: string, lineOffset: number, strict: b
   let bullet: { text: string; line: number; parent?: BulletFrame; indent: number } | null = null;
 
   const sectionName = () => (headings.length ? headings.map((h) => h.text).join(" > ") : undefined);
+  /** The nearest heading that says what kind of section this is decides. */
+  const inDescriptiveSection = () => {
+    for (let i = headings.length - 1; i >= 0; i--) {
+      const text = (headings[i] as { text: string }).text;
+      if (PRESCRIPTIVE_SECTION.test(text)) return false;
+      if (DESCRIPTIVE_SECTION.test(text)) return true;
+    }
+    return false;
+  };
 
   const flushParagraph = () => {
     if (!paragraph) return;
@@ -404,7 +434,10 @@ export function extractMarkdownRules(body: string, lineOffset: number, strict: b
     const text = cleanMarkdown(bullet.text);
     const parentText = bullet.parent?.text.replace(/:$/, "").trim();
     const full = parentText && bullet.parent?.text.endsWith(":") ? `${parentText}: ${text}` : text;
-    const candidate: Candidate & { dropped?: boolean } = { text: full, line: bullet.line, section: sectionName() };
+    // A bullet shaped like a glossary entry ("`npm test` - ...") or sitting in a descriptive section is a
+    // reference note unless it is worded as a rule.
+    const reference = (/^`[^`]+`\s*(?:[-–—:(]|$)/.test(text) || inDescriptiveSection()) && !hasRuleWording(full);
+    const candidate: BulletCandidate = { text: full, line: bullet.line, section: sectionName(), ...(reference ? { reference } : {}) };
     if (bullet.parent?.text.endsWith(":")) bullet.parent.candidate.dropped = true;
     out.push(candidate);
     bulletStack.push({ indent: bullet.indent, text, candidate });
@@ -490,8 +523,9 @@ export function extractMarkdownRules(body: string, lineOffset: number, strict: b
   return out
     .filter((c) => !c.dropped)
     .filter((c) => !(c.text.endsWith(":") && c.text.length < 80))
+    .filter((c) => !c.reference)
     .filter((c) => isAcceptable(c.text, strict))
-    .map(({ dropped: _dropped, ...rest }) => rest);
+    .map(({ dropped: _dropped, reference: _reference, ...rest }) => rest);
 }
 
 const JSON_TEXT_KEYS = new Set([

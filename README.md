@@ -181,6 +181,7 @@ These are found automatically. A rule file you keep out of git (a personal `CLAU
 
 Also:
 
+- Notes that only describe the project, such as a list of build commands or a folder layout, are not treated as rules. A bullet in those sections still counts when it is worded as a rule ("always", "never", "must", "only", ...).
 - An `AGENTS.md` or `CLAUDE.md` inside a subfolder applies only to files in that subfolder.
 - If a rule file points at another one ("follow the guidelines in `docs/standards/`"), that target is read too.
 - Scoping written in the files is respected: Cursor `globs` / `alwaysApply`, Copilot `applyTo`, Kiro `inclusion` / `fileMatchPattern`, Windsurf `trigger` / `globs`.
