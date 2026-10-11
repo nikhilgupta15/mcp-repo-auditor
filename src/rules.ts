@@ -574,6 +574,8 @@ interface SourceCandidate {
   relPath: string;
   kind: RuleSourceKind;
   strict: boolean;
+  /** Found by a search of every folder (or by following a pointer), not at one of the known rule locations. */
+  searched?: boolean;
 }
 
 function toPosix(p: string): string {
@@ -612,7 +614,7 @@ async function autoDiscover(repoRoot: string): Promise<SourceCandidate[]> {
     const matches = (await globFiles(repoRoot, pattern)).sort();
     for (const match of matches) {
       const key = match.toLowerCase();
-      if (!seen.has(key)) seen.set(key, { relPath: match, kind, strict: strict ?? false });
+      if (!seen.has(key)) seen.set(key, { relPath: match, kind, strict: strict ?? false, searched: pattern.startsWith("**/") });
     }
   }
   return [...seen.values()];
@@ -657,7 +659,7 @@ async function followPointers(repoRoot: string, sources: SourceCandidate[]): Pro
         }
         for (const file of files.slice(0, MAX_POINTER_FILES)) {
           const key = file.toLowerCase();
-          if (!out.has(key)) out.set(key, { relPath: file, kind: "docs", strict: false });
+          if (!out.has(key)) out.set(key, { relPath: file, kind: "docs", strict: false, searched: true });
         }
       }
     }
@@ -709,21 +711,24 @@ async function resolveCustomPaths(
 }
 
 /**
- * Removes auto-discovered files that git ignores (virtualenvs, vendored
- * packages, build output), so third-party AGENTS.md / CLAUDE.md files are
- * never mistaken for the repository's own rules.
+ * Removes files found by searching every folder that git ignores (virtualenvs,
+ * vendored packages, build output), so third-party AGENTS.md / CLAUDE.md files
+ * are never mistaken for the repository's own rules. Files at the known rule
+ * locations (root CLAUDE.md, .cursor/rules, ...) are kept even when ignored:
+ * people often keep their personal rule files out of git on purpose.
  */
 async function dropGitIgnored(
   repoRoot: string,
   candidates: SourceCandidate[],
   skipped: SkippedRuleSource[],
 ): Promise<SourceCandidate[]> {
-  if (!candidates.length) return candidates;
+  const searched = candidates.filter((c) => c.searched);
+  if (!searched.length) return candidates;
   let ignored: Set<string>;
   try {
     // Exit code 1 means "none of the paths are ignored".
     const out = await runGit(repoRoot, ["check-ignore", "-z", "--stdin"], {
-      input: `${candidates.map((c) => c.relPath).join("\0")}\0`,
+      input: `${searched.map((c) => c.relPath).join("\0")}\0`,
       okExitCodes: [0, 1],
     });
     ignored = new Set(out.split("\0").filter(Boolean));
@@ -732,7 +737,7 @@ async function dropGitIgnored(
     return candidates;
   }
   return candidates.filter((c) => {
-    if (!ignored.has(c.relPath)) return true;
+    if (!c.searched || !ignored.has(c.relPath)) return true;
     skipped.push({ path: c.relPath, reason: "ignored by .gitignore" });
     return false;
   });

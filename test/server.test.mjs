@@ -292,3 +292,25 @@ test("a file that gets no room at all is left out, with its mapping", async () =
     await client.close();
   }
 });
+
+test("gitignored rule files at known locations are used; ignored ones found by search are not", async () => {
+  const repo = makeRepo({
+    ".gitignore": "CLAUDE.md\n.cursor/\nthird_party/\n",
+    "src/api/users.ts": "export const a = 1;\n",
+  });
+  write(repo, {
+    "CLAUDE.md": "- Never use `any` in exported signatures.\n",
+    ".cursor/rules/style.mdc": "---\nglobs: src/**/*.ts\n---\n- Use named exports only.\n",
+    "third_party/lib/AGENTS.md": "- Always vendor this library unchanged.\n",
+    "src/api/users.ts": "export const a = 1;\nexport const b = 2;\n",
+  });
+  const client = await connect(repo);
+  try {
+    const { json } = await audit(client, { scope: "working" });
+    assert.deepEqual(json.meta.rule_sources.map((s) => s.path).sort(), [".cursor/rules/style.mdc", "CLAUDE.md"]);
+    assert.deepEqual(json.meta.skipped_rule_sources, [{ path: "third_party/lib/AGENTS.md", reason: "ignored by .gitignore" }]);
+    assert.equal(rulesFor(json, /users\.ts$/).length, 2);
+  } finally {
+    await client.close();
+  }
+});

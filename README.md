@@ -166,7 +166,7 @@ Your answers are saved per repository in `~/.mcp-repo-auditor/preferences.json`,
 
 ## Where rules come from
 
-These are found automatically. Files ignored by `.gitignore` are skipped.
+These are found automatically. A rule file you keep out of git (a personal `CLAUDE.md`, an ignored `.cursor/` folder) is still used. Only `AGENTS.md` / `CLAUDE.md` files found inside ignored subfolders, such as a virtualenv or vendored package, are skipped.
 
 | Tool | Files |
 |---|---|
