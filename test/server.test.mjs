@@ -190,3 +190,34 @@ test("branch scope follows origin/HEAD for an unusual default branch", async () 
     await client.close();
   }
 });
+
+test("staged scope with nothing staged reports the unstaged files and offers a working audit", async () => {
+  const repo = basicRepo();
+  write(repo, {
+    "src/api/users.ts": "export const a: any = 1;\n",
+    "src/new/one.ts": "export const one = 1;\n",
+    "src/new/two.ts": "export const two = 2;\n",
+  });
+  const client = await connect(repo);
+  try {
+    const { json } = await audit(client, {});
+    assert.equal(json.changed_files.length, 0);
+    assert.equal(json.meta.unstaged_files, 3);
+    assert.match(json.system_evaluator_prompt, /3 file\(s\) have unstaged or new changes/);
+    assert.match(json.system_evaluator_prompt, /scope "working"/);
+  } finally {
+    await client.close();
+  }
+});
+
+test("staged scope in a clean repository just says there is nothing to audit", async () => {
+  const repo = basicRepo();
+  const client = await connect(repo);
+  try {
+    const { json } = await audit(client, {});
+    assert.equal(json.meta.unstaged_files, undefined);
+    assert.match(json.system_evaluator_prompt, /No auditable changes for scope `staged`/);
+  } finally {
+    await client.close();
+  }
+});

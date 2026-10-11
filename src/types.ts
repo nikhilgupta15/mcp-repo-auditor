@@ -68,6 +68,8 @@ export interface DiffResult {
   comparison: string;
   files: ChangedFile[];
   warnings: string[];
+  /** Set when a staged audit found nothing: how many files have unstaged or untracked changes. */
+  unstagedFiles?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +258,8 @@ export interface AuditPayload {
     };
     rule_sources: Array<{ path: string; kind: RuleSourceKind; rules: number }>;
     skipped_rule_sources: SkippedRuleSource[];
+    /** Present when a staged audit found nothing staged: files with unstaged or new changes. */
+    unstaged_files?: number;
     warnings: string[];
     /** The preferences this audit ran with, and where they came from. */
     preferences?: {

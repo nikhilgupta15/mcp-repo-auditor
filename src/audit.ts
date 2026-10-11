@@ -103,6 +103,16 @@ const NO_CHANGES_PROMPT = [
   "Then, if meta.warnings or skipped files are present, list them as bullet points under `## Notes`. No other text.",
 ].join("\n");
 
+const NOTHING_STAGED_PROMPT = [
+  "You are a strict code-compliance judge. Nothing is staged in this repository, so the staged audit had nothing to check.",
+  "However, {COUNT} file(s) have unstaged or new (untracked) changes.",
+  "Output exactly:",
+  "## Compliance Matrix",
+  "Nothing is staged, so nothing was audited. {COUNT} file(s) have unstaged or new changes.",
+  "",
+  'Then ask the user in one line whether to audit those instead; if they agree, call this tool again with scope "working". No other text.',
+].join("\n");
+
 const NO_RULES_PROMPT = [
   "You are a strict code-compliance judge. No repository rules were discovered (or none are relevant to the changed files),",
   "so there is nothing to evaluate. Do NOT invent rules or perform a general code review.",
@@ -221,7 +231,9 @@ export async function runAudit(input: AuditInput, ctx: AuditContext): Promise<Au
   const pairs = payloadMappings.reduce((sum, m) => sum + m.rule_ids.length, 0);
 
   let prompt: string;
-  if (auditableFiles.length === 0) {
+  if (diff.unstagedFiles) {
+    prompt = NOTHING_STAGED_PROMPT.replace(/\{COUNT\}/g, String(diff.unstagedFiles));
+  } else if (auditableFiles.length === 0) {
     prompt = NO_CHANGES_PROMPT.replace("{SCOPE}", input.scope).replace("{COMPARISON}", diff.comparison);
   } else if (pairs === 0) {
     prompt = NO_RULES_PROMPT;
@@ -248,6 +260,7 @@ export async function runAudit(input: AuditInput, ctx: AuditContext): Promise<Au
       },
       rule_sources: discovery.sources.map((s) => ({ path: s.path, kind: s.kind, rules: s.ruleCount })),
       skipped_rule_sources: discovery.skipped,
+      ...(diff.unstagedFiles ? { unstaged_files: diff.unstagedFiles } : {}),
       warnings: [...diff.warnings, ...discovery.warnings, ...matchWarnings],
     },
     changed_files: diff.files.map(toPayloadFile),

@@ -635,6 +635,26 @@ async function untrackedFiles(repoRoot: string, warnings: string[]): Promise<Cha
   return files;
 }
 
+/** Number of files with unstaged or untracked changes; explains an empty staged audit. */
+async function countUnstagedFiles(repoRoot: string): Promise<number> {
+  try {
+    const out = await runGit(repoRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const entries = out.split("\0");
+    let count = 0;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (!entry) continue;
+      // Renames and copies are followed by a second field holding the old path.
+      if (entry[0] === "R" || entry[0] === "C") i += 1;
+      count += 1;
+    }
+    return count;
+  } catch (error) {
+    logger.warn(`git status failed: ${(error as Error).message}`);
+    return 0;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -698,5 +718,8 @@ export async function getDiff(repoRoot: string, scope: DiffScope, branch: string
   files.sort((a, b) => a.path.localeCompare(b.path));
   files = applyBudgets(files, warnings);
 
-  return { repoRoot, scope, comparison, files, warnings };
+  // "Audit my changes" before any `git add` is common; say what is waiting instead of just "nothing".
+  const unstagedFiles = scope === "staged" && files.length === 0 ? await countUnstagedFiles(repoRoot) : 0;
+
+  return { repoRoot, scope, comparison, files, warnings, ...(unstagedFiles ? { unstagedFiles } : {}) };
 }

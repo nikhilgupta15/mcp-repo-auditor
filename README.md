@@ -233,7 +233,7 @@ When a limit cuts something off, the audit says so in its warnings.
 |---|---|
 | The server does not start on Windows | Use the `cmd /c npx` form shown above |
 | "Not a git repository" | Open the repository folder in your client, set `MCP_REPO_AUDITOR_ROOT`, or name the path in your request |
-| No changed files | Nothing is staged. Run `git add`, or ask for "working changes" or a branch audit |
+| "Nothing is staged" | The default audit covers staged changes only. Accept the offer to audit your working changes, run `git add`, or ask for a branch audit |
 | No rules found | The repository has none of the files listed above. Add one, or point at your own in setup question 3 |
 | The setup questions do not appear | They are asked once per repository. Say "reconfigure the repo auditor" |
 | The audit is slow | The time is the model judging each file against each rule. Audit a smaller scope, or lower `MCP_REPO_AUDITOR_MAX_RULES_PER_FILE` |
