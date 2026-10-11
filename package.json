@@ -1,6 +1,6 @@
 {
   "name": "mcp-repo-auditor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local MCP server that audits your git changes against the repo's own AI rules (AGENTS.md, CLAUDE.md, .cursorrules, Copilot, Kiro, skills) and returns a compliance table or an HTML report.",
   "type": "module",
   "main": "dist/index.js",
