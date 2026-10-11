@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
 const created = [];
@@ -58,8 +59,12 @@ export function makeRepo(files, { branch = "main" } = {}) {
   return root;
 }
 
-/** Starts the server in `cwd`. Setup questions are off unless `env` turns them on. */
-export async function connect(cwd, env = {}) {
+/**
+ * Starts the server in `cwd`. Setup questions are off unless `env` turns them on.
+ * Pass `onForm` to act as a client with form support: it receives each form
+ * request and returns the user's response ({ action, content }).
+ */
+export async function connect(cwd, env = {}, onForm) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [SERVER],
@@ -73,7 +78,8 @@ export async function connect(cwd, env = {}) {
     },
     stderr: "ignore",
   });
-  const client = new Client({ name: "tests", version: "0.0.0" }, { capabilities: {} });
+  const client = new Client({ name: "tests", version: "0.0.0" }, { capabilities: onForm ? { elicitation: {} } : {} });
+  if (onForm) client.setRequestHandler(ElicitRequestSchema, async (request) => onForm(request.params));
   await client.connect(transport);
   return client;
 }

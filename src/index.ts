@@ -14,7 +14,18 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { REPORT_TOOL_NAME, runAudit } from "./audit.js";
+import {
+  AUDIT_TOOL_NAME,
+  describePlan,
+  partPayload,
+  planText,
+  prepareAudit,
+  recordFindings,
+  reportData,
+  REPORT_TOOL_NAME,
+  sessionKey,
+  type AuditSession,
+} from "./audit.js";
 import { resolveRepoRoot } from "./git.js";
 import {
   DEFAULT_PREFERENCES,
@@ -23,19 +34,23 @@ import {
   resolveReportDir,
   savePreferences,
   SETUP_QUESTIONS,
+  toPathList,
   type Preferences,
 } from "./preferences.js";
 import { renderReport } from "./report.js";
-import type { AuditPayload } from "./types.js";
+import type { AuditInput } from "./types.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { name: string; version: string };
 
-const TOOL_NAME = "audit_repo_compliance";
+const TOOL_NAME = AUDIT_TOOL_NAME;
 const CONFIGURE_TOOL_NAME = "configure_audit";
 
-/** The most recent audit of this session; the report tool renders verdicts against it. */
-let lastAudit: AuditPayload | undefined;
+/**
+ * The most recent audit of this session. A large change is handed out in
+ * parts from this one snapshot, and the report tool records verdicts against it.
+ */
+let session: AuditSession | undefined;
 
 type SetupOutcome =
   | { kind: "ready"; preferences: Preferences; note?: string }
@@ -116,6 +131,48 @@ async function runSetup(repoRoot: string, current: Preferences | undefined): Pro
   }
 }
 
+type PlanDecision = { kind: "all" } | { kind: "paths"; paths: string[] } | { kind: "ask" } | { kind: "cancelled" };
+
+/**
+ * A change that needs several parts is never started silently. The user sees
+ * the plan and decides: through the client's form when it has one, otherwise
+ * the assistant shows the plan in chat ("ask").
+ */
+async function approvePlan(audit: AuditSession): Promise<PlanDecision> {
+  if (!server.server.getClientCapabilities()?.elicitation) return { kind: "ask" };
+  try {
+    const result = await server.server.elicitInput(
+      {
+        message: `${planText(audit)}\n\nChoose how to proceed. You will see each part as it is audited.`,
+        requestedSchema: {
+          type: "object",
+          properties: {
+            proceed: {
+              type: "string",
+              title: "How should this be audited?",
+              description: "all = audit every part, one after another; cancel = stop, nothing is audited",
+              enum: ["all", "cancel"],
+            },
+            paths: {
+              type: "string",
+              title: "Or audit only these files or folders",
+              description: "Comma-separated, relative to the repository (e.g. src/api, src/big.ts). Leave blank to audit everything.",
+            },
+          },
+          required: ["proceed"],
+        },
+      },
+      { timeout: 10 * 60_000 },
+    );
+    if (result.action !== "accept" || result.content?.proceed === "cancel") return { kind: "cancelled" };
+    const paths = toPathList(result.content?.paths);
+    return paths.length ? { kind: "paths", paths } : { kind: "all" };
+  } catch (error) {
+    logger.warn(`plan form failed, falling back to chat: ${(error as Error).message}`);
+    return { kind: "ask" };
+  }
+}
+
 const server = new McpServer(
   { name: pkg.name, version: pkg.version },
   {
@@ -124,7 +181,8 @@ const server = new McpServer(
       "Use audit_repo_compliance to check local git changes against the repository's own AI steering rules " +
       "(.cursorrules, .clinerules, .windsurfrules, AGENTS.md, CLAUDE.md, .github/copilot-instructions.md, .kiro/steering, docs). " +
       "The tool returns JSON; follow its system_evaluator_prompt field exactly when writing the answer. " +
-      'When the user wants an HTML or browser report, call it with report: "html".',
+      'When the user wants an HTML or browser report, call it with report: "html". ' +
+      "A change too large for one result is audited in parts: the tool first returns a plan for the user to approve, then one part per call.",
   },
 );
 
@@ -157,7 +215,8 @@ server.registerTool(
       "Deterministically collects the local git diff (staged, working tree, or branch vs base), discovers the repo's " +
       "steering/instruction files, extracts atomic rules, and maps only the relevant rules to each changed file. " +
       "Returns a JSON payload {meta, changed_files, discovered_rules, file_rule_mappings, system_evaluator_prompt}. " +
-      "After calling, act as the compliance judge described in system_evaluator_prompt and output the Markdown matrix.",
+      "After calling, act as the compliance judge described in system_evaluator_prompt. " +
+      "A change too large for one result returns plan_required instead: show the user the plan, let them choose, then request the parts one at a time with `part`.",
     inputSchema: {
       scope: z
         .enum(["staged", "working", "branch"])
@@ -190,6 +249,18 @@ server.registerTool(
         .describe(
           `Only set this when the user asked for a format in this request; otherwise omit it so their saved preference applies. markdown = print the compliance matrix in the reply; html = send the verdicts to ${REPORT_TOOL_NAME}, which writes a browsable HTML report.`,
         ),
+      paths: z
+        .array(z.string().min(1).max(1024))
+        .max(200)
+        .optional()
+        .describe("Audit only these changed files, folders or globs, relative to the repository root (e.g. [\"src/api\", \"src/big.ts\"]). Omit to audit every changed file."),
+      part: z
+        .number()
+        .int()
+        .min(1)
+        .max(10_000)
+        .optional()
+        .describe("Which part of a multi-part audit to return. Only set it after the user has approved the plan from a plan_required result, or when a result's NEXT STEP says so."),
       reconfigure: z
         .boolean()
         .optional()
@@ -203,7 +274,7 @@ server.registerTool(
       openWorldHint: false,
     },
   },
-  async ({ scope, branch: branchArg, customRulePaths: extraRulePaths, repoPath, report: reportArg, reconfigure }) => {
+  async ({ scope, branch: branchArg, customRulePaths: extraRulePaths, repoPath, report: reportArg, reconfigure, paths, part }) => {
     const started = Date.now();
     try {
       const startDir = await pickStartDir(repoPath);
@@ -245,10 +316,56 @@ server.registerTool(
       const customRulePaths = [...new Set([...preferences.customRulePaths, ...(extraRulePaths ?? [])])];
       logger.info(`audit scope=${scope} branch=${branch || "(default)"} report=${report} repo=${repoRoot}`);
 
-      const payload = await runAudit(
-        { scope, branch, customRulePaths, repoPath, report },
-        { repoRoot, toolName: TOOL_NAME, version: pkg.version },
-      );
+      const input: AuditInput = { scope, branch, customRulePaths, paths: paths ?? [], repoPath, report };
+      const ctx = { repoRoot, toolName: TOOL_NAME, version: pkg.version };
+      // A later part comes from the snapshot the plan was made from, so the parts always add up to one diff.
+      // When the user narrowed the audit in the plan form, the assistant's arguments carry no paths: keep the user's selection.
+      const continues =
+        part !== undefined &&
+        session !== undefined &&
+        session.key === sessionKey({ ...input, paths: paths ?? session.input.paths }, repoRoot);
+      let audit = continues && session ? session : await prepareAudit(input, ctx);
+      session = audit;
+
+      const total = Math.max(1, audit.parts.length);
+      if (part !== undefined && part > total) {
+        throw new Error(`This audit has ${total} part${total > 1 ? "s" : ""}; there is no part ${part}.`);
+      }
+      if (part === undefined && total > 1) {
+        const decision = await approvePlan(audit);
+        if (decision.kind === "cancelled") {
+          return { content: [{ type: "text" as const, text: JSON.stringify({ cancelled: true, message: "The user cancelled at the audit plan. Nothing was audited; tell them so." }) }] };
+        }
+        if (decision.kind === "ask") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  plan_required: true,
+                  repo_root: repoRoot,
+                  scope,
+                  comparison: audit.diff.comparison,
+                  summary: planText(audit),
+                  plan: describePlan(audit),
+                  instructions:
+                    "Nothing has been audited yet. Show the user the summary and a table of the parts (part, files, added lines), then ask how to proceed and wait for the answer. Do not choose for them. Options: " +
+                    `(1) audit everything: call ${TOOL_NAME} again with the same arguments plus part: 1, then follow each result's NEXT STEP through all parts; ` +
+                    "(2) audit only some parts: request just those part numbers, one call each; " +
+                    "(3) audit only some files or folders: call again with paths: [...] and no part; " +
+                    "(4) cancel.",
+                }),
+              },
+            ],
+          };
+        }
+        if (decision.kind === "paths") {
+          audit = await prepareAudit({ ...input, paths: decision.paths }, ctx);
+          session = audit;
+        }
+      }
+
+      const payload = partPayload(audit, part ?? 1);
       if (setupNote) payload.meta.warnings.push(setupNote);
       payload.meta.preferences = {
         report,
@@ -257,7 +374,6 @@ server.registerTool(
         branch: branch || "repository default (detected)",
         source: saved ? "saved for this repository" : "defaults",
       };
-      lastAudit = payload;
       const s = payload.meta.stats;
       logger.info(
         `audit done in ${Date.now() - started}ms: files=${s.changed_files} audited=${s.audited_files} ` +
@@ -282,6 +398,8 @@ server.registerTool(
     description:
       `Writes a self-contained HTML report for the most recent ${TOOL_NAME} call in this session from your verdicts, ` +
       "and returns its path. Rule text, offending code and N/A counts are filled in by the server. " +
+      "In a multi-part audit, call it once per part with `part`: each call adds that part's verdicts, rewrites the same report file " +
+      "(which states the parts still open) and returns next_step. " +
       "The file goes to the report folder the user chose at setup, or the system temp directory if they chose none.",
     inputSchema: {
       findings: z
@@ -302,6 +420,13 @@ server.registerTool(
         )
         .max(5000)
         .describe("One entry per non-N/A (file, rule) pair. Omit N/A pairs."),
+      part: z
+        .number()
+        .int()
+        .min(1)
+        .max(10_000)
+        .optional()
+        .describe("In a multi-part audit: the part these findings belong to (required there). Omit for an audit with a single part."),
     },
     annotations: {
       title: "Render compliance report",
@@ -311,13 +436,39 @@ server.registerTool(
       openWorldHint: false,
     },
   },
-  async ({ findings }) => {
+  async ({ findings, part }) => {
     try {
-      if (!lastAudit) throw new Error(`No audit in this session yet. Call ${TOOL_NAME} first.`);
+      if (!session) throw new Error(`No audit in this session yet. Call ${TOOL_NAME} first.`);
+      const audit = session;
+      const total = Math.max(1, audit.parts.length);
+      const number = part ?? (total === 1 ? 1 : undefined);
+      if (number === undefined) throw new Error(`This audit has ${total} parts. Pass part: <n> with the findings for that part.`);
+      if (number > total) throw new Error(`This audit has ${total} part${total > 1 ? "s" : ""}; there is no part ${number}.`);
+      if (!audit.served.has(number)) {
+        throw new Error(`Part ${number} has not been requested yet. Call ${TOOL_NAME} with part: ${number} first and judge what it returns.`);
+      }
+      const ignored = recordFindings(audit, number, findings);
       // Read the folder now, not at audit time, so a preference changed in between is honoured.
-      const reportDir = (await loadPreferences(lastAudit.meta.repo_root))?.reportDir ?? "";
-      const result = await renderReport(lastAudit, findings, reportDir);
-      logger.info(`report written to ${result.report_path}`);
+      const reportDir = (await loadPreferences(audit.ctx.repoRoot))?.reportDir ?? "";
+      const report = await renderReport(reportData(audit), reportDir, audit.reportPath);
+      audit.reportPath = report.report_path;
+
+      const judged = [...audit.findings.keys()].sort((a, b) => a - b);
+      const pending = audit.parts.filter((p) => !audit.findings.has(p.number)).map((p) => p.number);
+      const result = {
+        ...report,
+        ignored_findings: ignored,
+        parts: { total, judged, pending },
+        complete: pending.length === 0,
+        ...(total > 1
+          ? {
+              next_step: pending.length
+                ? `Parts not audited yet: ${pending.join(", ")}. Unless the user asked for only some parts, call ${TOOL_NAME} now with the same arguments plus part: ${pending[0]}.`
+                : "Every part is audited and the report is complete. Give the user the final two lines.",
+            }
+          : {}),
+      };
+      logger.info(`report written to ${report.report_path} (part ${number} of ${total})`);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
