@@ -57,7 +57,7 @@ export interface ChangedFile {
   hunks: DiffHunk[];
   /** Set when hunks were omitted (lockfile, generated, binary, too large). */
   skippedReason?: string;
-  /** True when hunks were cut to stay within the per-file line budget. */
+  /** True when hunks were cut to stay within the line or size budget. */
   truncated?: boolean;
 }
 

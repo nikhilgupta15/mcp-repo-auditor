@@ -2,7 +2,7 @@
  * Orchestrates diff -> rule discovery -> matching and builds the payload
  * returned to the host LLM, including the evaluator prompt.
  */
-import { getDiff } from "./git.js";
+import { applySizeBudget, getDiff, LIMITS } from "./git.js";
 import { matchRulesToFiles } from "./matcher.js";
 import { discoverRules } from "./rules.js";
 import type {
@@ -73,6 +73,11 @@ const EVALUATOR_PROMPT = [
   "",
   "Zero conversational filler: no greeting, preamble, restated instructions, summary prose or closing remarks outside these sections.",
 ].join("\n");
+
+/** Allowance for the result's meta block (stats, preferences, warnings). */
+const META_SIZE = 2_500;
+/** The diff always gets at least this much, however many rules there are. */
+const MIN_DIFF_CHARS = 12_000;
 
 export const REPORT_TOOL_NAME = "render_compliance_report";
 
@@ -201,8 +206,8 @@ export async function runAudit(input: AuditInput, ctx: AuditContext): Promise<Au
   const matchWarnings: string[] = [];
   const { mappings, relevantRuleIds } = matchRulesToFiles(diff.files, discovery.rules, matchWarnings);
 
-  const relevantRules = discovery.rules.filter((r) => relevantRuleIds.has(r.id));
-  const payloadRules: PayloadRule[] = relevantRules.map((r) => ({
+  let relevantRules = discovery.rules.filter((r) => relevantRuleIds.has(r.id));
+  const toPayloadRule = (r: (typeof relevantRules)[number]): PayloadRule => ({
     id: r.id,
     text: r.text,
     source: r.sourceFile,
@@ -211,9 +216,10 @@ export async function runAudit(input: AuditInput, ctx: AuditContext): Promise<Au
     category: r.category,
     ...(r.appliesTo.length ? { applies_to: r.appliesTo } : {}),
     ...(r.languages.length ? { languages: r.languages } : {}),
-  }));
+  });
+  let payloadRules = relevantRules.map(toPayloadRule);
 
-  const payloadMappings: PayloadMapping[] = mappings
+  let payloadMappings: PayloadMapping[] = mappings
     .filter((m) => m.rules.length > 0)
     .map((m) => {
       const basis: Record<string, string[]> = {};
@@ -227,7 +233,24 @@ export async function runAudit(input: AuditInput, ctx: AuditContext): Promise<Au
       };
     });
 
+  // Everything except the diff has a fixed size; the diff gets what is left of the result budget.
+  const fixedSize =
+    JSON.stringify(payloadRules).length +
+    JSON.stringify(payloadMappings).length +
+    JSON.stringify([discovery.sources, discovery.skipped]).length +
+    EVALUATOR_PROMPT.length +
+    META_SIZE;
+  applySizeBudget(diff.files, Math.max(MIN_DIFF_CHARS, LIMITS.maxPayloadChars - fixedSize), diff.warnings);
+
   const auditableFiles = diff.files.filter((f) => !f.skippedReason && f.hunks.length > 0);
+  // A file the budget left out entirely has nothing to judge: drop its mapping and any rule only it used.
+  const auditablePaths = new Set(auditableFiles.map((f) => f.path));
+  if (payloadMappings.some((m) => !auditablePaths.has(m.file))) {
+    payloadMappings = payloadMappings.filter((m) => auditablePaths.has(m.file));
+    const used = new Set(payloadMappings.flatMap((m) => m.rule_ids));
+    relevantRules = relevantRules.filter((r) => used.has(r.id));
+    payloadRules = relevantRules.map(toPayloadRule);
+  }
   const pairs = payloadMappings.reduce((sum, m) => sum + m.rule_ids.length, 0);
 
   let prompt: string;

@@ -34,6 +34,11 @@ export const LIMITS = {
   maxLinesPerFile: envInt("MCP_REPO_AUDITOR_MAX_LINES_PER_FILE", 1500),
   /** Max diff lines emitted across all files. */
   maxTotalLines: envInt("MCP_REPO_AUDITOR_MAX_TOTAL_LINES", 6000),
+  /**
+   * Target size of the whole tool result, in characters. Clients cap tool results
+   * (Claude Code at 25,000 tokens by default), so the diff is cut to fit.
+   */
+  maxPayloadChars: envInt("MCP_REPO_AUDITOR_MAX_CHARS", 64_000),
   /** Max number of changed files reported. */
   maxFiles: envInt("MCP_REPO_AUDITOR_MAX_FILES", 300),
   /** Max size of an untracked file read from disk. */
@@ -566,6 +571,79 @@ function applyBudgets(files: ChangedFile[], warnings: string[]): ChangedFile[] {
     file.hunks = kept;
   }
   return result;
+}
+
+/** Approximate size of one diff line in the JSON result: escaped content plus its "+ 123 | " annotation. */
+function lineCost(line: DiffLine): number {
+  return JSON.stringify(line.content).length + 14;
+}
+
+const HUNK_COST = 80;
+const FILE_COST = 220;
+
+function fileCost(file: ChangedFile): number {
+  let cost = FILE_COST + file.path.length;
+  for (const hunk of file.hunks) {
+    cost += HUNK_COST;
+    for (const line of hunk.lines) cost += lineCost(line);
+  }
+  return cost;
+}
+
+/** Keeps as many leading lines of `file` as fit in `allowance` characters. */
+function trimFile(file: ChangedFile, allowance: number): void {
+  let used = FILE_COST + file.path.length;
+  const kept: DiffHunk[] = [];
+  for (const hunk of file.hunks) {
+    used += HUNK_COST;
+    const lines: DiffLine[] = [];
+    for (const line of hunk.lines) {
+      const cost = lineCost(line);
+      if (used + cost > allowance) break;
+      used += cost;
+      lines.push(line);
+    }
+    if (lines.length) kept.push(lines.length === hunk.lines.length ? hunk : { ...hunk, lines });
+    if (lines.length < hunk.lines.length) break;
+  }
+  file.hunks = kept;
+  if (kept.length) file.truncated = true;
+  else file.skippedReason = "left out: the change is larger than the size budget (MCP_REPO_AUDITOR_MAX_CHARS)";
+}
+
+/**
+ * Cuts the diff so it fits in `budget` characters. Small files are kept whole
+ * and the large ones share what is left equally, so one huge file cannot push
+ * every other file out of the audit.
+ */
+export function applySizeBudget(files: ChangedFile[], budget: number, warnings: string[]): void {
+  const live = files.filter((f) => !f.skippedReason && f.hunks.length > 0);
+  const costs = new Map(live.map((f) => [f, fileCost(f)]));
+  const total = [...costs.values()].reduce((sum, c) => sum + c, 0);
+  if (total <= budget) return;
+
+  const smallestFirst = [...live].sort((a, b) => (costs.get(a) as number) - (costs.get(b) as number));
+  let remaining = budget;
+  const cut: string[] = [];
+  smallestFirst.forEach((file, index) => {
+    const share = Math.floor(remaining / (smallestFirst.length - index));
+    const cost = costs.get(file) as number;
+    if (cost <= share) {
+      remaining -= cost;
+      return;
+    }
+    trimFile(file, share);
+    remaining -= share;
+    cut.push(file.path);
+  });
+
+  cut.sort((a, b) => a.localeCompare(b));
+  warnings.push(
+    `The change is larger than the result size budget (MCP_REPO_AUDITOR_MAX_CHARS = ${LIMITS.maxPayloadChars} characters). ` +
+      `${cut.length} file(s) were cut short and their remaining lines were NOT audited: ${cut.slice(0, 10).join(", ")}` +
+      `${cut.length > 10 ? `, and ${cut.length - 10} more` : ""}. Tell the user, and suggest auditing a narrower scope ` +
+      "(staged changes only, or fewer files at a time) to cover them.",
+  );
 }
 
 // ---------------------------------------------------------------------------

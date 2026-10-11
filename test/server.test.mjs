@@ -248,3 +248,47 @@ test("other git failures are passed on instead of being called 'not a repository
     await client.close();
   }
 });
+
+test("a large change is cut to fit the result size budget, fairly across files", async () => {
+  const repo = basicRepo();
+  const big = Array.from({ length: 3000 }, (_, i) => `export const value${i} = computeSomething(${i}, "label-${i}");`).join("\n");
+  write(repo, {
+    "src/big-one.ts": `${big}\n`,
+    "src/big-two.ts": `${big}\n`,
+    "src/small.ts": "export const small: any = 1;\n",
+  });
+  const client = await connect(repo);
+  try {
+    const { json, text } = await audit(client, { scope: "working" });
+    assert.ok(text.length < 70_000, `result is ${text.length} characters`);
+    const byPath = new Map(json.changed_files.map((f) => [f.path, f]));
+    const lines = (p) => byPath.get(p).hunks.reduce((n, h) => n + h.lines.length, 0);
+    assert.equal(byPath.get("src/small.ts").truncated, undefined);
+    assert.equal(lines("src/small.ts"), 1);
+    assert.equal(byPath.get("src/big-one.ts").truncated, true);
+    assert.equal(byPath.get("src/big-two.ts").truncated, true);
+    assert.ok(Math.abs(lines("src/big-one.ts") - lines("src/big-two.ts")) <= 1, "large files share the budget equally");
+    assert.ok(lines("src/big-one.ts") > 200);
+    const warning = json.meta.warnings.find((w) => w.includes("MCP_REPO_AUDITOR_MAX_CHARS"));
+    assert.match(warning, /2 file\(s\) were cut short.*src\/big-one\.ts, src\/big-two\.ts/);
+    assert.equal(json.file_rule_mappings.length, 3);
+  } finally {
+    await client.close();
+  }
+});
+
+test("a file that gets no room at all is left out, with its mapping", async () => {
+  const repo = basicRepo();
+  const long = `export const text = "${"x".repeat(80_000)}";\n`;
+  write(repo, { "src/huge-line.ts": long, "src/small.ts": "export const small: any = 1;\n" });
+  const client = await connect(repo);
+  try {
+    const { json } = await audit(client, { scope: "working" });
+    const huge = json.changed_files.find((f) => f.path === "src/huge-line.ts");
+    assert.match(huge.skipped_reason, /MCP_REPO_AUDITOR_MAX_CHARS/);
+    assert.deepEqual(json.file_rule_mappings.map((m) => m.file), ["src/small.ts"]);
+    assert.equal(json.meta.stats.audited_files, 1);
+  } finally {
+    await client.close();
+  }
+});

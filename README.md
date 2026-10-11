@@ -217,6 +217,7 @@ Optional environment variables, set in the `env` block of your MCP config.
 | `MCP_REPO_AUDITOR_REPORT` | `markdown` | Default format: `markdown` or `html` |
 | `MCP_REPO_AUDITOR_REPORT_DIR` | system temp folder | Default folder for HTML reports |
 | `MCP_REPO_AUDITOR_CONFIG_DIR` | `~/.mcp-repo-auditor` | Where preferences are stored |
+| `MCP_REPO_AUDITOR_MAX_CHARS` | `64000` | Target size of one audit result, in characters. Larger changes are cut to fit: small files stay whole and large ones share the rest |
 | `MCP_REPO_AUDITOR_MAX_FILES` | `300` | Most changed files included |
 | `MCP_REPO_AUDITOR_MAX_LINES_PER_FILE` | `1500` | Most diff lines per file |
 | `MCP_REPO_AUDITOR_MAX_TOTAL_LINES` | `6000` | Most diff lines overall |
@@ -225,7 +226,9 @@ Optional environment variables, set in the `env` block of your MCP config.
 | `MCP_REPO_AUDITOR_GIT_TIMEOUT_MS` | `60000` | Timeout for each git command |
 | `MCP_REPO_AUDITOR_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` (written to stderr) |
 
-When a limit cuts something off, the audit says so in its warnings.
+When a limit cuts something off, the audit says so in its warnings and names the files that were not fully checked.
+
+The size limit exists because MCP clients cap how much a tool may return (Claude Code allows 25,000 tokens by default). If your client allows more, raise `MCP_REPO_AUDITOR_MAX_CHARS`; otherwise audit a big change in smaller scopes.
 
 ## Troubleshooting
 
