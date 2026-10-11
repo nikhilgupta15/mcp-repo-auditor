@@ -14,8 +14,9 @@ const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "di
 const created = [];
 
 export function tempDir(prefix = "mra-") {
-  // realpath: macOS temp folders sit behind a symlink, and git reports the resolved path.
-  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), prefix)));
+  // Native realpath: macOS temp folders sit behind a symlink and Windows may hand out a
+  // short (8.3) name; git reports the resolved, long path.
+  const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), prefix)));
   created.push(dir);
   return dir;
 }
