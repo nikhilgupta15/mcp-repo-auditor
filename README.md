@@ -249,6 +249,7 @@ The server itself sends nothing anywhere. The diff and the rules it returns go t
 ```bash
 npm install        # installs and builds
 npm run build      # -> dist/
+npm test           # builds, then runs the end-to-end tests
 npm run inspect    # try the tools in the MCP Inspector
 ```
 
