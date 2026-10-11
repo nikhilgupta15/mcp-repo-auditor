@@ -232,7 +232,8 @@ When a limit cuts something off, the audit says so in its warnings.
 | Problem | What to do |
 |---|---|
 | The server does not start on Windows | Use the `cmd /c npx` form shown above |
-| "Not a git repository" | Open the repository folder in your client, set `MCP_REPO_AUDITOR_ROOT`, or name the path in your request |
+| "Not inside a git repository" | Open the repository folder in your client, set `MCP_REPO_AUDITOR_ROOT`, or name the path in your request |
+| "git could not open the repository" | Git itself refused; the message carries its reason and, for "dubious ownership", the command that fixes it |
 | "Nothing is staged" | The default audit covers staged changes only. Accept the offer to audit your working changes, run `git add`, or ask for a branch audit |
 | No rules found | The repository has none of the files listed above. Add one, or point at your own in setup question 3 |
 | The setup questions do not appear | They are asked once per repository. Say "reconfigure the repo auditor" |

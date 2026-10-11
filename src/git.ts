@@ -143,7 +143,15 @@ export async function resolveRepoRoot(startDir: string): Promise<string> {
     return path.resolve(out.trim());
   } catch (error) {
     if (error instanceof GitError && error.exitCode === null) throw error;
-    throw new Error(`Not inside a git repository: ${startDir}`);
+    const detail = error instanceof GitError ? error.stderr.trim() : "";
+    if (!detail || /not a git repository/i.test(detail)) {
+      throw new Error(
+        `Not inside a git repository: ${startDir}. Call again with repoPath set to the absolute path of the repository to audit ` +
+          "(ask the user if you do not know it), or set MCP_REPO_AUDITOR_ROOT in the server's config.",
+      );
+    }
+    // Anything else (e.g. git's "dubious ownership" refusal, a broken config) is not a wrong folder: pass git's own words on.
+    throw new Error(`git could not open the repository at ${startDir}: ${detail}`);
   }
 }
 

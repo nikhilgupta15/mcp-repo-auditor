@@ -221,3 +221,30 @@ test("staged scope in a clean repository just says there is nothing to audit", a
     await client.close();
   }
 });
+
+test("a folder that is not a repository gets an error that says what to do", async () => {
+  const client = await connect(tempDir());
+  try {
+    const { isError, json } = await audit(client, {});
+    assert.equal(isError, true);
+    assert.match(json.error, /^Not inside a git repository: /);
+    assert.match(json.error, /repoPath/);
+    assert.match(json.error, /MCP_REPO_AUDITOR_ROOT/);
+  } finally {
+    await client.close();
+  }
+});
+
+test("other git failures are passed on instead of being called 'not a repository'", async () => {
+  const repo = basicRepo();
+  write(repo, { ".git/config": "this is not a valid config file\n" });
+  const client = await connect(repo);
+  try {
+    const { isError, json } = await audit(client, {});
+    assert.equal(isError, true);
+    assert.match(json.error, /^git could not open the repository at /);
+    assert.match(json.error, /bad config/);
+  } finally {
+    await client.close();
+  }
+});
