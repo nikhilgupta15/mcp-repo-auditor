@@ -148,3 +148,45 @@ test("rules scoped with brace globs are applied to matching files", async () => 
     await client.close();
   }
 });
+
+test("branch scope finds the default branch when it is not main", async () => {
+  const repo = basicRepo({ branch: "master" });
+  git(repo, "checkout", "-q", "-b", "feature/x");
+  write(repo, { "src/api/users.ts": "export const a = 1;\nexport const b: any = 2;\n" });
+  git(repo, "commit", "-q", "-am", "feature");
+  const client = await connect(repo);
+  try {
+    const detected = await audit(client, { scope: "branch" });
+    assert.equal(detected.isError, false);
+    assert.equal(detected.json.meta.comparison.startsWith("master...HEAD"), true);
+    assert.equal(detected.json.meta.stats.audited_files, 1);
+
+    const wrong = await audit(client, { scope: "branch", branch: "main" });
+    assert.equal(wrong.isError, true);
+    assert.match(wrong.json.error, /default branch looks like "master"/);
+    assert.match(wrong.json.error, /Branches here: .*feature\/x/);
+  } finally {
+    await client.close();
+  }
+});
+
+test("branch scope follows origin/HEAD for an unusual default branch", async () => {
+  const origin = basicRepo({ branch: "release-line" });
+  const repo = tempDir("mra-clone-");
+  git(repo, "clone", "-q", origin, ".");
+  git(repo, "config", "user.email", "test@example.com");
+  git(repo, "config", "user.name", "Test");
+  git(repo, "config", "core.autocrlf", "false");
+  git(repo, "checkout", "-q", "-b", "feature/y");
+  git(repo, "branch", "-q", "-D", "release-line");
+  write(repo, { "src/api/users.ts": "export const a = 1;\nexport const b: any = 2;\n" });
+  git(repo, "commit", "-q", "-am", "feature");
+  const client = await connect(repo);
+  try {
+    const { json, isError } = await audit(client, { scope: "branch" });
+    assert.equal(isError, false);
+    assert.equal(json.meta.comparison.startsWith("origin/release-line...HEAD"), true);
+  } finally {
+    await client.close();
+  }
+});

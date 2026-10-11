@@ -164,10 +164,63 @@ async function emptyTreeId(repoRoot: string): Promise<string> {
 
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._\/@{}~^+-]*$/;
 
-/** Validates a user-supplied branch/ref name and resolves it to an existing commit-ish. */
+async function refExists(repoRoot: string, ref: string): Promise<boolean> {
+  try {
+    await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const COMMON_DEFAULT_BRANCHES = ["main", "master", "develop", "trunk"];
+
+/**
+ * The repository's default branch: what origin/HEAD points at, otherwise the
+ * first conventional name that exists. A local branch wins over origin/<name>.
+ */
+async function detectDefaultBranch(repoRoot: string): Promise<string | undefined> {
+  const names = [...COMMON_DEFAULT_BRANCHES];
+  try {
+    const head = (await runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])).trim();
+    if (head.startsWith("origin/")) names.unshift(head.slice("origin/".length));
+  } catch {
+    // No origin/HEAD (no remote, or never set): fall back to the conventional names.
+  }
+  for (const name of names) {
+    for (const ref of [name, `origin/${name}`]) {
+      if (await refExists(repoRoot, ref)) return ref;
+    }
+  }
+  return undefined;
+}
+
+/** Up to 15 branch names, for error messages. */
+async function listBranches(repoRoot: string): Promise<string> {
+  try {
+    const out = await runGit(repoRoot, ["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"]);
+    const names = out.split("\n").map((n) => n.trim()).filter((n) => n && n !== "origin" && !n.endsWith("/HEAD"));
+    if (!names.length) return "";
+    return ` Branches here: ${names.slice(0, 15).join(", ")}${names.length > 15 ? ", …" : ""}.`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Resolves the base for a branch audit to an existing commit-ish. An empty
+ * `branch` means "the repository's default branch", which is detected.
+ */
 export async function resolveBaseRef(repoRoot: string, branch: string): Promise<string> {
   const candidate = branch.trim();
-  if (!candidate || !SAFE_REF.test(candidate) || candidate.includes("..")) {
+  if (!candidate) {
+    const detected = await detectDefaultBranch(repoRoot);
+    if (detected) return detected;
+    throw new Error(
+      `Could not work out which branch to compare against. Ask the user and pass it as "branch".${await listBranches(repoRoot)}`,
+    );
+  }
+  if (!SAFE_REF.test(candidate) || candidate.includes("..")) {
     throw new Error(
       `Invalid branch name "${branch}". Use a plain ref such as "main", "origin/main" or a commit SHA.`,
     );
@@ -177,15 +230,13 @@ export async function resolveBaseRef(repoRoot: string, branch: string): Promise<
   if (!candidate.startsWith("origin/")) candidates.push(`origin/${candidate}`);
 
   for (const ref of candidates) {
-    try {
-      await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
-      return ref;
-    } catch {
-      // try next candidate
-    }
+    if (await refExists(repoRoot, ref)) return ref;
   }
+  const detected = await detectDefaultBranch(repoRoot);
   throw new Error(
-    `Base branch "${candidate}" not found locally or as origin/${candidate}. Fetch it first (git fetch origin ${candidate}).`,
+    `Base branch "${candidate}" not found locally or as origin/${candidate}.` +
+      (detected ? ` This repository's default branch looks like "${detected}"; call again with that as "branch" if it is what the user means.` : "") +
+      (await listBranches(repoRoot)),
   );
 }
 

@@ -132,7 +132,8 @@ Open your repository in the client and ask in plain words:
 |---|---|
 | "Audit my staged changes" | What `git add` has staged (the default) |
 | "Audit my working changes" | Staged, unstaged and new untracked files |
-| "Audit this branch against main" | Every commit on your branch since it left `main` |
+| "Audit this branch" | Every commit on your branch since it left the default branch |
+| "Audit this branch against develop" | The same, against a base branch you name |
 
 ### First run: four questions
 
@@ -141,7 +142,7 @@ The first time you audit a repository, you are asked:
 1. **Results format:** Markdown table in the chat, or an HTML report file.
 2. **Report folder** (HTML only): an absolute path, or a word like `downloads`, `desktop` or `documents`. Blank uses the system temp folder.
 3. **Extra rule files:** files or folders to audit against besides the ones found automatically. Blank means none.
-4. **Base branch** for branch audits. Blank means `main`.
+4. **Base branch** for branch audits. Blank means the repository's default branch (`main`, `master`, ...), which is found automatically.
 
 Clients that support MCP forms (Claude Code does) show these as a form. In other clients the assistant asks them in the chat.
 

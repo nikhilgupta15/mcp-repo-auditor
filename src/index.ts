@@ -170,7 +170,7 @@ server.registerTool(
         .min(1)
         .max(255)
         .optional()
-        .describe('Base branch for scope "branch" (falls back to origin/<branch>). Omit to use the saved preference ("main" if none).'),
+        .describe('Base branch for scope "branch" (falls back to origin/<branch>). Omit to use the saved preference, or the repository\'s default branch if none.'),
       customRulePaths: z
         .array(z.string().min(1).max(1024))
         .max(100)
@@ -243,7 +243,7 @@ server.registerTool(
       const report = reportArg ?? preferences.report;
       const branch = branchArg ?? preferences.branch;
       const customRulePaths = [...new Set([...preferences.customRulePaths, ...(extraRulePaths ?? [])])];
-      logger.info(`audit scope=${scope} branch=${branch} report=${report} repo=${repoRoot}`);
+      logger.info(`audit scope=${scope} branch=${branch || "(default)"} report=${report} repo=${repoRoot}`);
 
       const payload = await runAudit(
         { scope, branch, customRulePaths, repoPath, report },
@@ -254,7 +254,7 @@ server.registerTool(
         report,
         report_dir: preferences.reportDir || "system temp folder",
         custom_rule_paths: customRulePaths,
-        branch,
+        branch: branch || "repository default (detected)",
         source: saved ? "saved for this repository" : "defaults",
       };
       lastAudit = payload;
@@ -343,7 +343,7 @@ server.registerTool(
       report: z.enum(["markdown", "html"]).optional().describe("markdown = table in the chat/terminal; html = report file for the browser."),
       reportDir: z.string().max(4096).optional().describe("Folder for HTML reports. Empty string = system temp folder. Relative paths are taken from the repository root."),
       customRulePaths: z.array(z.string().min(1).max(1024)).max(100).optional().describe("Extra rule files, folders or globs relative to the repository root. Replaces the saved list."),
-      branch: z.string().min(1).max(255).optional().describe("Base branch for branch audits."),
+      branch: z.string().max(255).optional().describe("Base branch for branch audits. Empty string = the repository's default branch, detected automatically."),
     },
     annotations: { title: "Save audit preferences", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
