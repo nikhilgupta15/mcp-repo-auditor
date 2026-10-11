@@ -134,6 +134,7 @@ Open your repository in the client and ask in plain words:
 | "Audit my working changes" | Staged, unstaged and new untracked files |
 | "Audit this branch" | Every commit on your branch since it left the default branch |
 | "Audit this branch against develop" | The same, against a base branch you name |
+| "Audit my working changes in src/api" | Only the changed files in that folder (a file or a glob works too) |
 
 ### First run: four questions
 
@@ -147,6 +148,31 @@ The first time you audit a repository, you are asked:
 Clients that support MCP forms (Claude Code does) show these as a form. In other clients the assistant asks them in the chat.
 
 Your answers are saved per repository in `~/.mcp-repo-auditor/preferences.json`, never inside the repository. To change them, say "reconfigure the repo auditor". To override the format once, say it in the request: "audit my working changes as an HTML report".
+
+### Large changes
+
+MCP clients limit how much a tool may return in one result (Claude Code allows 25,000 tokens by default), so a big change cannot be handed to the assistant in one piece. Nothing is cut or sampled. The change is audited in **parts**, and you decide how before anything runs.
+
+1. **You see the plan first.** The audit stops and shows how the change is divided:
+
+   ```
+   This change is too large for one result: 3 file(s), 4,201 added line(s),
+   about 107,000 tokens to read (estimate). It will be audited in 6 parts,
+   every line in exactly one of them:
+     Part 1 (+743 lines): src/big-one.ts (lines 1-743)
+     Part 2 (+720 lines): src/big-one.ts (lines 744-1463)
+     ...
+     Part 6 (+587 lines): src/big-two.ts (lines 615-1200), src/small.ts
+   Not audited: 1 file(s) (lockfiles, binaries, generated or deleted files).
+   ```
+
+2. **You choose.** Audit every part, only some parts ("just parts 1 and 2"), only some files or folders ("only src/api"), or cancel. In Claude Code this is a form; in other clients the assistant asks in the chat.
+3. **You watch it run.** Each part is reported as it is judged. In Markdown you get that part's table and its counts. For HTML, the report file is rewritten after every part and you get a one-line progress note.
+4. **You always know what was covered.** The final result says which parts were audited. An HTML report with parts still open is marked **INCOMPLETE**, lists the files not audited yet, and tags files that were only partly covered. It never shows COMPLIANT for a partial audit.
+
+A file too big for one part continues in the next one with its line numbers intact. All parts come from one snapshot of the diff taken when the plan is made, so edits you make while the audit runs do not shift the parts.
+
+A bigger change takes proportionally more time and tokens; the estimate in the plan is there so you can narrow the audit instead.
 
 ### What you get
 
@@ -195,14 +221,16 @@ Also:
 4. Hands the diff, the rules and the mapping to your AI assistant, with instructions to judge every pair strictly.
 5. For HTML, the assistant sends its verdicts back and the server writes the report.
 
+A change too large for one result goes through steps 4 and 5 once per part; see [Large changes](#large-changes).
+
 Steps 1 to 3 and the report are plain code and take well under a second. The judging in step 4 is done by your assistant's model, so its speed and quality depend on the model you use.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `audit_repo_compliance` | Runs the audit. Inputs: `scope` (`staged`, `working`, `branch`), `branch`, `customRulePaths`, `repoPath`, `report` (`markdown`, `html`), `reconfigure` |
-| `render_compliance_report` | Writes the HTML report from the assistant's findings |
+| `audit_repo_compliance` | Runs the audit, or returns the plan for a large change. Inputs: `scope` (`staged`, `working`, `branch`), `branch`, `paths` (files, folders or globs to limit the audit to), `part` (which part of a large audit), `customRulePaths`, `repoPath`, `report` (`markdown`, `html`), `reconfigure` |
+| `render_compliance_report` | Writes the HTML report from the assistant's findings; in a large audit it is called once per `part` and refreshes the same file |
 | `configure_audit` | Saves or changes the preferences for a repository |
 
 You do not normally call these yourself; the assistant picks them.
@@ -218,18 +246,15 @@ Optional environment variables, set in the `env` block of your MCP config.
 | `MCP_REPO_AUDITOR_REPORT` | `markdown` | Default format: `markdown` or `html` |
 | `MCP_REPO_AUDITOR_REPORT_DIR` | system temp folder | Default folder for HTML reports |
 | `MCP_REPO_AUDITOR_CONFIG_DIR` | `~/.mcp-repo-auditor` | Where preferences are stored |
-| `MCP_REPO_AUDITOR_MAX_CHARS` | `64000` | Target size of one audit result, in characters. Larger changes are cut to fit: small files stay whole and large ones share the rest |
-| `MCP_REPO_AUDITOR_MAX_FILES` | `300` | Most changed files included |
-| `MCP_REPO_AUDITOR_MAX_LINES_PER_FILE` | `1500` | Most diff lines per file |
-| `MCP_REPO_AUDITOR_MAX_TOTAL_LINES` | `6000` | Most diff lines overall |
+| `MCP_REPO_AUDITOR_MAX_CHARS` | `64000` | Size of one audit result, in characters. A larger change is audited in parts of about this size |
 | `MCP_REPO_AUDITOR_MAX_RULES_PER_FILE` | `80` | Most rules checked per file (highest priority kept) |
 | `MCP_REPO_AUDITOR_MAX_UNTRACKED_BYTES` | `524288` | Largest untracked file read in `working` scope |
 | `MCP_REPO_AUDITOR_GIT_TIMEOUT_MS` | `60000` | Timeout for each git command |
 | `MCP_REPO_AUDITOR_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` (written to stderr) |
 
-When a limit cuts something off, the audit says so in its warnings and names the files that were not fully checked.
+If your client accepts larger tool results, raise `MCP_REPO_AUDITOR_MAX_CHARS` and big changes need fewer parts. The older line and file limits (`MAX_FILES`, `MAX_LINES_PER_FILE`, `MAX_TOTAL_LINES`) are gone: they cut the diff, and parts replace them.
 
-The size limit exists because MCP clients cap how much a tool may return (Claude Code allows 25,000 tokens by default). If your client allows more, raise `MCP_REPO_AUDITOR_MAX_CHARS`; otherwise audit a big change in smaller scopes.
+Two things are still left out, and the audit says so each time: more than 80 rules for one file (the highest-priority 80 are kept), and the tail of a single line longer than 2,000 characters.
 
 ## Troubleshooting
 
@@ -241,7 +266,8 @@ The size limit exists because MCP clients cap how much a tool may return (Claude
 | "Nothing is staged" | The default audit covers staged changes only. Accept the offer to audit your working changes, run `git add`, or ask for a branch audit |
 | No rules found | The repository has none of the files listed above. Add one, or point at your own in setup question 3 |
 | The setup questions do not appear | They are asked once per repository. Say "reconfigure the repo auditor" |
-| The audit is slow | The time is the model judging each file against each rule. Audit a smaller scope, or lower `MCP_REPO_AUDITOR_MAX_RULES_PER_FILE` |
+| The audit is slow | The time is the model judging each file against each rule. Audit a smaller scope or fewer files ("only src/api"), or lower `MCP_REPO_AUDITOR_MAX_RULES_PER_FILE` |
+| The assistant stopped part-way through a large audit | Say "continue the audit" or name the parts left; the result and the HTML report list them |
 | I want to see what it is doing | Set `MCP_REPO_AUDITOR_LOG_LEVEL` to `debug` and read the server's stderr log in your client |
 
 To update, restart your client; `npx -y mcp-repo-auditor@latest` in the config always fetches the newest version.
