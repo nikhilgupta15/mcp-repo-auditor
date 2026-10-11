@@ -166,13 +166,26 @@ MCP clients limit how much a tool may return in one result (Claude Code allows 2
    Not audited: 1 file(s) (lockfiles, binaries, generated or deleted files).
    ```
 
-2. **You choose.** Audit every part, only some parts ("just parts 1 and 2"), only some files or folders ("only src/api"), or cancel. In Claude Code this is a form; in other clients the assistant asks in the chat.
+2. **You choose.** Audit every part one after another, every part in parallel (see below), only some parts ("just parts 1 and 2"), only some files or folders ("only src/api"), or cancel. In Claude Code this is a form; in other clients the assistant asks in the chat.
 3. **You watch it run.** Each part is reported as it is judged. In Markdown you get that part's table and its counts. For HTML, the report file is rewritten after every part and you get a one-line progress note.
 4. **You always know what was covered.** The final result says which parts were audited. An HTML report with parts still open is marked **INCOMPLETE**, lists the files not audited yet, and tags files that were only partly covered. It never shows COMPLIANT for a partial audit.
 
 A file too big for one part continues in the next one with its line numbers intact. All parts come from one snapshot of the diff taken when the plan is made, so edits you make while the audit runs do not shift the parts.
 
 A bigger change takes proportionally more time and tokens; the estimate in the plan is there so you can narrow the audit instead.
+
+#### One after another, or in parallel
+
+| | One after another (default) | In parallel |
+|---|---|---|
+| How | Your assistant judges part 1, then part 2, and so on | Your assistant starts one subagent per part, all at the same time |
+| Time | Grows with the number of parts | About the time of one part |
+| What you see while it runs | Each part's results as it is judged | One line saying the subagents were started, then the combined result |
+| Size it copes with | Around ten parts, because every part is read into the same conversation | More, because each subagent reads only its own part |
+| Tokens | Spread over the run | Somewhat more in total, and spent all at once |
+| Needs | Any MCP client | A client whose assistant can start subagents that can use this server's tools (Claude Code can) |
+
+In parallel mode every subagent sends its verdicts to the server. The server adds them up and builds the combined result: the HTML report, or the finished Markdown table, which the assistant prints as it is. If a subagent fails, the result names the part that is still open and the assistant retries it once. If the client cannot run subagents, the assistant says so and audits the parts one after another instead.
 
 ### What you get
 
@@ -229,8 +242,9 @@ Steps 1 to 3 and the report are plain code and take well under a second. The jud
 
 | Tool | Purpose |
 |---|---|
-| `audit_repo_compliance` | Runs the audit, or returns the plan for a large change. Inputs: `scope` (`staged`, `working`, `branch`), `branch`, `paths` (files, folders or globs to limit the audit to), `part` (which part of a large audit), `customRulePaths`, `repoPath`, `report` (`markdown`, `html`), `reconfigure` |
+| `audit_repo_compliance` | Runs the audit, or returns the plan for a large change. Inputs: `scope` (`staged`, `working`, `branch`), `branch`, `paths` (files, folders or globs to limit the audit to), `part` (which part of a large audit), `parallel` (hand the parts to subagents), `customRulePaths`, `repoPath`, `report` (`markdown`, `html`), `reconfigure` |
 | `render_compliance_report` | Writes the HTML report from the assistant's findings; in a large audit it is called once per `part` and refreshes the same file |
+| `audit_status` | Says which parts of the current audit have verdicts and the totals so far; after a parallel audit it returns the combined result |
 | `configure_audit` | Saves or changes the preferences for a repository |
 
 You do not normally call these yourself; the assistant picks them.
