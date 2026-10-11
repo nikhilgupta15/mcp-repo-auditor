@@ -15,10 +15,12 @@ It is a local [Model Context Protocol](https://modelcontextprotocol.io) server. 
 ## Demo
 
 <!-- Demo video: drag mcp-repo-auditor-demo.mp4 onto the line below in the GitHub editor. -->
+https://github.com/user-attachments/assets/3414f3aa-ac69-45a1-a277-c8e9797ff5da
 
 The HTML report for a sample audit:
 
 ![HTML compliance report showing the verdict, counts and suggested code changes](https://raw.githubusercontent.com/nikhilgupta15/mcp-repo-auditor/main/assets/report.png)
+
 
 ## Requirements
 
