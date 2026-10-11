@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="mcp-repo-auditor logo">
+  <rect width="512" height="512" rx="116" fill="#0f1322"/>
+  <rect x="5" y="5" width="502" height="502" rx="111" fill="none" stroke="#2a3150" stroke-width="10"/>
+  <g fill="none" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M104 150l26 26 46-52" stroke="#56d38a"/>
+    <path d="M104 256l26 26 46-52" stroke="#56d38a"/>
+    <path d="M110 334l56 56M166 334l-56 56" stroke="#ff7b72"/>
+  </g>
+  <g stroke-width="30" stroke-linecap="round">
+    <path d="M232 150h176" stroke="#8090ff"/>
+    <path d="M232 256h120" stroke="#8090ff"/>
+    <path d="M232 362h152" stroke="#ff7b72"/>
+  </g>
+</svg>

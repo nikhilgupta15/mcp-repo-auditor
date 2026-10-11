@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/nikhilgupta15/mcp-repo-auditor/main/assets/logo.svg" alt="mcp-repo-auditor logo" width="120" height="120">
+</p>
+
 # mcp-repo-auditor
 
 Check your code changes against the rules your repository already gives AI agents: `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, Copilot instructions, Kiro steering, skills and more.
@@ -7,6 +11,14 @@ It is a local [Model Context Protocol](https://modelcontextprotocol.io) server. 
 - **Local.** No API key, no account, no network calls. It reads your git diff and your rule files, nothing else.
 - **Any repository, any language.** Nothing to configure per repo; the rules come from the files already in it.
 - **Only relevant rules.** A Python rule is not checked against a TypeScript file, and a testing rule is not checked against a migration.
+
+## Demo
+
+<!-- Demo video: drag mcp-repo-auditor-demo.mp4 onto the line below in the GitHub editor. -->
+
+The HTML report for a sample audit:
+
+![HTML compliance report showing the verdict, counts and suggested code changes](https://raw.githubusercontent.com/nikhilgupta15/mcp-repo-auditor/main/assets/report.png)
 
 ## Requirements
 
