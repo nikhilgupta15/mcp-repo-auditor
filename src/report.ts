@@ -415,3 +415,94 @@ export async function renderReport(data: ReportData, reportDir = "", existingPat
 
   return { report_path: reportPath, report_url: pathToFileURL(reportPath).href, verdict, counts };
 }
+
+// ---------------------------------------------------------------------------
+// Totals and the Markdown rendering (used when the parts were judged by subagents)
+// ---------------------------------------------------------------------------
+
+export interface ReportSummary {
+  verdict: ReportResult["verdict"];
+  counts: ReportResult["counts"];
+}
+
+/** Counts and verdict over the judged parts; the same arithmetic the HTML report shows. */
+export function summarize(data: ReportData): ReportSummary {
+  const counts = { pass: 0, fail: 0, skipped: 0, not_applicable: 0 };
+  for (const unit of data.units) {
+    const judged = new Set(unit.findings.map((f) => f.rule_id));
+    counts.not_applicable += unit.ruleIds.filter((id) => !judged.has(id)).length;
+    for (const f of unit.findings) {
+      if (f.status === "Fail") counts.fail += 1;
+      else if (f.status === "Pass") counts.pass += 1;
+      else counts.skipped += 1;
+    }
+  }
+  const complete = data.coverage.pending.length === 0;
+  return { verdict: counts.fail > 0 ? "NON-COMPLIANT" : complete ? "COMPLIANT" : "INCOMPLETE", counts };
+}
+
+function cutText(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+const cell = (text: string) => text.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+
+/**
+ * The compliance matrix as Markdown, built from the recorded verdicts. Used
+ * when subagents judged the parts: their verdicts only exist on the server,
+ * so the server writes the table and the assistant prints it as is.
+ */
+export function renderMarkdown(data: ReportData): string {
+  const rules = new Map(data.rules.map((r) => [r.id, r]));
+  const files = new Map(data.files.map((f) => [f.path, f]));
+  const { verdict, counts } = summarize(data);
+  const order: Record<FindingStatus, number> = { Fail: 0, Pass: 1, Skipped: 2 };
+  const findings = data.units
+    .flatMap((unit) => unit.findings.map((f) => ({ ...f, part: unit.part })))
+    .sort((a, b) => a.file.localeCompare(b.file) || order[a.status] - order[b.status] || a.part - b.part);
+
+  const out: string[] = ["## Compliance Matrix"];
+  if (findings.length) {
+    out.push("| File | Rule Checked | Status (Pass/Fail/Skipped) | Line # | Explanation & Fix |", "|---|---|---|---|---|");
+    for (const f of findings) {
+      const rule = rules.get(f.rule_id);
+      const text = [f.explanation, f.status === "Fail" && f.fix ? `Fix: ${f.fix}` : ""].filter(Boolean).join(" ");
+      out.push(
+        `| ${cell(f.file)} | ${cell(`${f.rule_id}: ${cutText(rule?.text ?? "", 70)}`)} | ${f.status} | ${cell(f.line && /\d/.test(f.line) ? f.line : "—")} | ${cell(text)} |`,
+      );
+    }
+  } else {
+    out.push("No rule applied to the audited changes.");
+  }
+
+  out.push("", "## Violations");
+  const fails = findings.filter((f) => f.status === "Fail");
+  if (!fails.length) out.push("None.");
+  for (const f of fails) {
+    const rule = rules.get(f.rule_id);
+    const snippet = snippetFor(files.get(f.file), f.line);
+    out.push(`### \`${f.file}:${f.line && /\d/.test(f.line) ? f.line : "—"}\` — ${f.rule_id} ${cutText(rule?.text ?? "", 70)}`);
+    if (snippet.length) out.push("```diff", ...snippet.map((l) => `${l.sign === "+" ? "+" : " "} ${l.code}`), "```");
+    if (f.fix) out.push(`**Fix:** ${f.fix.replace(/\s+/g, " ").trim()}`);
+    if (f.fix_code?.trim()) {
+      const added = f.fix_code.replace(/\r\n?/g, "\n").replace(/^\n+|\s+$/g, "").split("\n");
+      out.push("```diff", ...snippet.filter((l) => l.flagged).map((l) => `- ${l.code}`), ...added.map((l) => `+ ${l}`), "```");
+    }
+  }
+
+  out.push("", "## Rules Considered");
+  const used = new Set(findings.map((f) => f.rule_id));
+  const considered = data.rules.filter((r) => used.has(r.id));
+  if (!considered.length) out.push("None of the mapped rules concerned the audited changes.");
+  for (const rule of considered) out.push(`- **${rule.id}** — ${cutText(rule.text, 140)} (\`${rule.source}:${rule.line}\`)`);
+
+  out.push("", "## Result", `\`${counts.pass} Pass · ${counts.fail} Fail · ${counts.skipped} Skipped · ${counts.not_applicable} N/A\` — **${verdict}**`);
+  if (data.coverage.total > 1) {
+    out.push(`\`Parts audited: ${data.coverage.judged.join(", ") || "none"} of ${data.coverage.total}\``);
+    for (const p of data.coverage.pending) {
+      out.push(`- Not audited: part ${p.part} (${p.files.slice(0, 6).join(", ")}${p.files.length > 6 ? ` and ${p.files.length - 6} more` : ""})`);
+    }
+  }
+  return out.join("\n");
+}

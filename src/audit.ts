@@ -162,6 +162,22 @@ function htmlPartOutput(part: number, total: number): string {
   ].join("\n");
 }
 
+/**
+ * Output for a part judged by a subagent while other subagents judge the other
+ * parts. In both report formats the verdicts go to the server, which puts the
+ * combined result together for the main assistant.
+ */
+function subagentPartOutput(part: number, total: number): string {
+  return [
+    `OUTPUT (this result is part ${part} of ${total} of one audit whose parts are judged in parallel)`,
+    `Do NOT print the matrix. Call the tool \`${REPORT_TOOL_NAME}\` exactly once with part: ${part} and:`,
+    ...FINDINGS_FIELD_RULES,
+    "The tool records this part's verdicts; the combined result is put together from all parts afterwards.",
+    `Then reply with exactly one line and nothing else: \`Part ${part} of ${total}: <P> Pass · <F> Fail · <S> Skipped · <N> N/A\` (the part_counts the tool returned).`,
+    "Do not edit any file. If you were started to audit only this part, stop here and do not request other parts.",
+  ].join("\n");
+}
+
 const NO_CHANGES_PROMPT = [
   "You are a strict code-compliance judge. The diff for the requested scope contains no auditable changes",
   "(changed_files is empty, or every file was skipped as deleted/binary/lockfile/generated).",
@@ -290,6 +306,8 @@ export interface AuditSession {
   warnings: string[];
   /** Empty when there is nothing to audit. */
   parts: AuditPart[];
+  /** True when the user chose to have the parts judged by subagents at the same time. */
+  parallel: boolean;
   /** Part numbers already handed to the assistant. */
   served: Set<number>;
   /** Verdicts received per part (HTML reports). */
@@ -355,6 +373,7 @@ export async function prepareAudit(input: AuditInput, ctx: AuditContext): Promis
     mappings: mappingByFile,
     warnings,
     parts,
+    parallel: false,
     served: new Set(),
     findings: new Map(),
     generatedAt: new Date().toISOString(),
@@ -464,7 +483,13 @@ export function partPayload(session: AuditSession, number: number): AuditPayload
     prompt = pairs === 0 ? NO_RULES_PROMPT : JUDGING_RULES + (input.report === "html" ? HTML_OUTPUT : MARKDOWN_OUTPUT);
   } else {
     const shown = labels.length > 6 ? `${labels.slice(0, 6).join(", ")} and ${labels.length - 6} more` : labels.join(", ");
-    prompt = JUDGING_RULES + (input.report === "html" ? htmlPartOutput(number, total) : markdownPartOutput(number, total, shown, next));
+    prompt =
+      JUDGING_RULES +
+      (session.parallel
+        ? subagentPartOutput(number, total)
+        : input.report === "html"
+          ? htmlPartOutput(number, total)
+          : markdownPartOutput(number, total, shown, next));
   }
 
   return {
@@ -553,9 +578,54 @@ export function planText(session: AuditSession): string {
   return lines.join("\n");
 }
 
+export const STATUS_TOOL_NAME = "audit_status";
+
+/**
+ * What the main assistant needs to have the parts judged at the same time:
+ * a brief for each subagent and what to do when they are done. `args` are the
+ * arguments that reproduce this audit; each subagent adds its own part number.
+ */
+export function parallelBrief(session: AuditSession, args: Record<string, unknown>): Record<string, unknown> {
+  const total = session.parts.length;
+  const html = session.input.report === "html";
+  return {
+    parallel: true,
+    repo_root: session.ctx.repoRoot,
+    total_parts: total,
+    parts: describePlan(session).parts,
+    subagent_brief: [
+      `You are auditing part <N> of ${total} of a code-compliance audit of the repository at ${session.ctx.repoRoot}. Other subagents audit the other parts at the same time.`,
+      `1. Call the MCP tool \`${AUDIT_TOOL_NAME}\` (the mcp-repo-auditor server) with exactly these arguments plus part: <N>:`,
+      `   ${JSON.stringify(args)}`,
+      "2. Judge what it returns exactly as its system_evaluator_prompt says.",
+      `3. Send your verdicts with the tool \`${REPORT_TOOL_NAME}\`, with part: <N>.`,
+      "4. Reply with the single line the prompt asks for. Do not print the matrix, do not edit files, and do not audit any other part.",
+    ].join("\n"),
+    instructions: [
+      `The user chose to audit the ${total} parts in parallel. Nothing has been audited yet.`,
+      `1. Tell the user in one line that ${total} subagents are being started, one per part.`,
+      `2. Start ${total} subagents in ONE message so they run at the same time. Give each the subagent_brief with <N> replaced by its part number (1 to ${total}). They need access to this MCP server's tools.`,
+      `3. When all of them have returned, call \`${STATUS_TOOL_NAME}\`.`,
+      `4. If it lists parts that are not audited, start a subagent for each of those once more and call \`${STATUS_TOOL_NAME}\` again.`,
+      html
+        ? "5. Reply with exactly two lines: the counts and verdict the tool returned (`<P> Pass · <F> Fail · <S> Skipped · <N> N/A` — **VERDICT**, adding `· parts <judged> of <total>` if any part is still open), then `Report: <report_path>`."
+        : "5. Print the tool's `markdown` field exactly as returned, and nothing else.",
+      `If you cannot start subagents, or they cannot call this server's tools, say so in one line and do the parts yourself instead: for each part from 1 to ${total}, call \`${AUDIT_TOOL_NAME}\` with the arguments above plus that part number and follow its result; then continue from step 3.`,
+    ].join("\n"),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Findings and report data
 // ---------------------------------------------------------------------------
+
+/** Counts for one judged part, from the verdicts recorded for it. */
+export function partCounts(session: AuditSession, number: number): { pass: number; fail: number; skipped: number; not_applicable: number } {
+  const findings = session.findings.get(number) ?? [];
+  const pairs = partMappings(session, session.parts[number - 1]).reduce((sum, m) => sum + m.rule_ids.length, 0);
+  const count = (status: FindingInput["status"]) => findings.filter((f) => f.status === status).length;
+  return { pass: count("Pass"), fail: count("Fail"), skipped: count("Skipped"), not_applicable: pairs - findings.length };
+}
 
 /**
  * Stores the verdicts for one part. Only (file, rule) pairs that part mapped

@@ -17,6 +17,8 @@ import { z } from "zod";
 import {
   AUDIT_TOOL_NAME,
   describePlan,
+  parallelBrief,
+  partCounts,
   partPayload,
   planText,
   prepareAudit,
@@ -24,6 +26,7 @@ import {
   reportData,
   REPORT_TOOL_NAME,
   sessionKey,
+  STATUS_TOOL_NAME,
   type AuditSession,
 } from "./audit.js";
 import { resolveRepoRoot } from "./git.js";
@@ -37,7 +40,7 @@ import {
   toPathList,
   type Preferences,
 } from "./preferences.js";
-import { renderReport } from "./report.js";
+import { renderMarkdown, renderReport, summarize } from "./report.js";
 import type { AuditInput } from "./types.js";
 
 const require = createRequire(import.meta.url);
@@ -51,6 +54,9 @@ const CONFIGURE_TOOL_NAME = "configure_audit";
  * parts from this one snapshot, and the report tool records verdicts against it.
  */
 let session: AuditSession | undefined;
+
+/** Report writes run one at a time: subagents finishing together must not overwrite a newer report with an older one. */
+let reportWrites: Promise<unknown> = Promise.resolve();
 
 type SetupOutcome =
   | { kind: "ready"; preferences: Preferences; note?: string }
@@ -131,7 +137,7 @@ async function runSetup(repoRoot: string, current: Preferences | undefined): Pro
   }
 }
 
-type PlanDecision = { kind: "all" } | { kind: "paths"; paths: string[] } | { kind: "ask" } | { kind: "cancelled" };
+type PlanDecision = { kind: "go"; parallel: boolean; paths: string[] } | { kind: "ask" } | { kind: "cancelled" };
 
 /**
  * A change that needs several parts is never started silently. The user sees
@@ -150,8 +156,11 @@ async function approvePlan(audit: AuditSession): Promise<PlanDecision> {
             proceed: {
               type: "string",
               title: "How should this be audited?",
-              description: "all = audit every part, one after another; cancel = stop, nothing is audited",
-              enum: ["all", "cancel"],
+              description:
+                "all = every part, one after another, shown as each is judged; " +
+                "parallel = every part at the same time by subagents (faster, uses more tokens at once, needs a client with subagents); " +
+                "cancel = stop, nothing is audited",
+              enum: ["all", "parallel", "cancel"],
             },
             paths: {
               type: "string",
@@ -165,8 +174,7 @@ async function approvePlan(audit: AuditSession): Promise<PlanDecision> {
       { timeout: 10 * 60_000 },
     );
     if (result.action !== "accept" || result.content?.proceed === "cancel") return { kind: "cancelled" };
-    const paths = toPathList(result.content?.paths);
-    return paths.length ? { kind: "paths", paths } : { kind: "all" };
+    return { kind: "go", parallel: result.content?.proceed === "parallel", paths: toPathList(result.content?.paths) };
   } catch (error) {
     logger.warn(`plan form failed, falling back to chat: ${(error as Error).message}`);
     return { kind: "ask" };
@@ -261,6 +269,10 @@ server.registerTool(
         .max(10_000)
         .optional()
         .describe("Which part of a multi-part audit to return. Only set it after the user has approved the plan from a plan_required result, or when a result's NEXT STEP says so."),
+      parallel: z
+        .boolean()
+        .optional()
+        .describe("Set true only when the user chose, at the plan, to audit the parts in parallel with subagents. The result is then a brief for the subagents instead of a part."),
       reconfigure: z
         .boolean()
         .optional()
@@ -274,7 +286,7 @@ server.registerTool(
       openWorldHint: false,
     },
   },
-  async ({ scope, branch: branchArg, customRulePaths: extraRulePaths, repoPath, report: reportArg, reconfigure, paths, part }) => {
+  async ({ scope, branch: branchArg, customRulePaths: extraRulePaths, repoPath, report: reportArg, reconfigure, paths, part, parallel }) => {
     const started = Date.now();
     try {
       const startDir = await pickStartDir(repoPath);
@@ -331,37 +343,48 @@ server.registerTool(
       if (part !== undefined && part > total) {
         throw new Error(`This audit has ${total} part${total > 1 ? "s" : ""}; there is no part ${part}.`);
       }
-      if (part === undefined && total > 1) {
-        const decision = await approvePlan(audit);
+      if (part === undefined && audit.parts.length > 1) {
+        // Arguments that reproduce this audit; a subagent adds its part number to them.
+        const briefFor = (current: AuditSession) =>
+          parallelBrief(current, {
+            repoPath: repoRoot,
+            scope,
+            ...(branchArg ? { branch: branchArg } : {}),
+            ...(current.input.paths.length ? { paths: current.input.paths } : {}),
+            ...(extraRulePaths?.length ? { customRulePaths: extraRulePaths } : {}),
+            report,
+          });
+        const asText = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
+
+        // parallel: true means the user already saw the plan and chose it.
+        const decision: PlanDecision = parallel ? { kind: "go", parallel: true, paths: [] } : await approvePlan(audit);
         if (decision.kind === "cancelled") {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ cancelled: true, message: "The user cancelled at the audit plan. Nothing was audited; tell them so." }) }] };
+          return asText({ cancelled: true, message: "The user cancelled at the audit plan. Nothing was audited; tell them so." });
         }
         if (decision.kind === "ask") {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  plan_required: true,
-                  repo_root: repoRoot,
-                  scope,
-                  comparison: audit.diff.comparison,
-                  summary: planText(audit),
-                  plan: describePlan(audit),
-                  instructions:
-                    "Nothing has been audited yet. Show the user the summary and a table of the parts (part, files, added lines), then ask how to proceed and wait for the answer. Do not choose for them. Options: " +
-                    `(1) audit everything: call ${TOOL_NAME} again with the same arguments plus part: 1, then follow each result's NEXT STEP through all parts; ` +
-                    "(2) audit only some parts: request just those part numbers, one call each; " +
-                    "(3) audit only some files or folders: call again with paths: [...] and no part; " +
-                    "(4) cancel.",
-                }),
-              },
-            ],
-          };
+          return asText({
+            plan_required: true,
+            repo_root: repoRoot,
+            scope,
+            comparison: audit.diff.comparison,
+            summary: planText(audit),
+            plan: describePlan(audit),
+            instructions:
+              "Nothing has been audited yet. Show the user the summary and a table of the parts (part, files, added lines), then ask how to proceed and wait for the answer. Do not choose for them. Options: " +
+              `(1) audit everything, one part after another, shown as each part is judged: call ${TOOL_NAME} again with the same arguments plus part: 1, then follow each result's NEXT STEP through all parts; ` +
+              "(2) audit everything in parallel with subagents (faster, uses more tokens at once, and only works if you can start subagents that can call this server's tools): call again with the same arguments plus parallel: true; " +
+              "(3) audit only some parts: request just those part numbers, one call each; " +
+              "(4) audit only some files or folders: call again with paths: [...] and no part; " +
+              "(5) cancel.",
+          });
         }
-        if (decision.kind === "paths") {
+        if (decision.paths.length) {
           audit = await prepareAudit({ ...input, paths: decision.paths }, ctx);
           session = audit;
+        }
+        if (decision.parallel && audit.parts.length > 1) {
+          audit.parallel = true;
+          return asText(briefFor(audit));
         }
       }
 
@@ -448,25 +471,39 @@ server.registerTool(
         throw new Error(`Part ${number} has not been requested yet. Call ${TOOL_NAME} with part: ${number} first and judge what it returns.`);
       }
       const ignored = recordFindings(audit, number, findings);
-      // Read the folder now, not at audit time, so a preference changed in between is honoured.
-      const reportDir = (await loadPreferences(audit.ctx.repoRoot))?.reportDir ?? "";
-      const report = await renderReport(reportData(audit), reportDir, audit.reportPath);
-      audit.reportPath = report.report_path;
-
       const judged = [...audit.findings.keys()].sort((a, b) => a - b);
       const pending = audit.parts.filter((p) => !audit.findings.has(p.number)).map((p) => p.number);
+      const progress = { ignored_findings: ignored, part_counts: partCounts(audit, number), parts: { total, judged, pending }, complete: pending.length === 0 };
+
+      // A parallel Markdown audit has no report file: the combined table comes from the status tool.
+      if (audit.parallel && audit.input.report !== "html") {
+        logger.info(`verdicts recorded for part ${number} of ${total}`);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ recorded: true, ...summarize(reportData(audit)), ...progress, next_step: "Recorded. Reply with the one line your instructions ask for." }) }],
+        };
+      }
+
+      // Read the folder now, not at audit time, so a preference changed in between is honoured.
+      const reportDir = (await loadPreferences(audit.ctx.repoRoot))?.reportDir ?? "";
+      const write = reportWrites.then(async () => {
+        const written = await renderReport(reportData(audit), reportDir, audit.reportPath);
+        audit.reportPath = written.report_path;
+        return written;
+      });
+      reportWrites = write.catch(() => undefined);
+      const report = await write;
       const result = {
         ...report,
-        ignored_findings: ignored,
-        parts: { total, judged, pending },
-        complete: pending.length === 0,
-        ...(total > 1
-          ? {
-              next_step: pending.length
-                ? `Parts not audited yet: ${pending.join(", ")}. Unless the user asked for only some parts, call ${TOOL_NAME} now with the same arguments plus part: ${pending[0]}.`
-                : "Every part is audited and the report is complete. Give the user the final two lines.",
-            }
-          : {}),
+        ...progress,
+        ...(audit.parallel
+          ? { next_step: "Recorded. Reply with the one line your instructions ask for." }
+          : total > 1
+            ? {
+                next_step: pending.length
+                  ? `Parts not audited yet: ${pending.join(", ")}. Unless the user asked for only some parts, call ${TOOL_NAME} now with the same arguments plus part: ${pending[0]}.`
+                  : "Every part is audited and the report is complete. Give the user the final two lines.",
+              }
+            : {}),
       };
       logger.info(`report written to ${report.report_path} (part ${number} of ${total})`);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
@@ -477,6 +514,53 @@ server.registerTool(
         isError: true,
         content: [{ type: "text" as const, text: JSON.stringify({ error: message, tool: REPORT_TOOL_NAME }) }],
       };
+    }
+  },
+);
+
+server.registerTool(
+  STATUS_TOOL_NAME,
+  {
+    title: "Audit status",
+    description:
+      `Reports where the most recent ${TOOL_NAME} audit of this session stands: which parts have verdicts, the totals and the verdict so far. ` +
+      "After a parallel audit it also returns the combined result: the report path (HTML) or the finished Markdown table. " +
+      "Call it when the subagents of a parallel audit have returned, or when the user asks how far an audit got.",
+    inputSchema: {},
+    annotations: { title: "Audit status", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async () => {
+    try {
+      if (!session) throw new Error(`No audit in this session yet. Call ${TOOL_NAME} first.`);
+      const audit = session;
+      await reportWrites;
+      const data = reportData(audit);
+      const total = Math.max(1, audit.parts.length);
+      const judged = [...audit.findings.keys()].sort((a, b) => a - b);
+      const pending = audit.parts.filter((p) => !audit.findings.has(p.number)).map((p) => p.number);
+      const html = audit.input.report === "html";
+      const result = {
+        ...summarize(data),
+        parts: { total, judged, pending, handed_out_without_verdicts: pending.filter((n) => audit.served.has(n)) },
+        complete: pending.length === 0,
+        report_format: audit.input.report ?? "markdown",
+        ...(html ? { report_path: audit.reportPath ?? null } : audit.parallel ? { markdown: renderMarkdown(data) } : {}),
+        next_step: pending.length
+          ? `Parts without verdicts: ${pending.join(", ")}. ` +
+            (audit.parallel
+              ? "Start a subagent for each of them once more (same brief), then call this tool again. If that was already tried, tell the user which parts are open."
+              : `Request them from ${TOOL_NAME} with part: <n>, or tell the user which parts are open.`)
+          : html
+            ? "Every part has verdicts. Give the user the counts, the verdict and the report path."
+            : audit.parallel
+              ? "Every part has verdicts. Print the markdown field exactly as returned, and nothing else."
+              : "Every part has been handed out.",
+      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`status failed: ${message}`);
+      return { isError: true, content: [{ type: "text" as const, text: JSON.stringify({ error: message, tool: STATUS_TOOL_NAME }) }] };
     }
   },
 );
