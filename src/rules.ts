@@ -232,14 +232,41 @@ function unquote(value: string): string {
   return v;
 }
 
+/**
+ * Splits a comma-separated list, leaving commas inside braces, brackets and
+ * quotes alone, so a glob such as "src/*.{ts,tsx}" stays in one piece.
+ */
+export function splitList(value: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote = "";
+  let current = "";
+  for (const ch of value) {
+    if (quote) {
+      if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === "{" || ch === "[") {
+      depth += 1;
+    } else if ((ch === "}" || ch === "]") && depth > 0) {
+      depth -= 1;
+    } else if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
 function parseScalar(raw: string): FrontmatterValue {
   const value = raw.trim();
   if (value === "true") return true;
   if (value === "false") return false;
   if (value.startsWith("[") && value.endsWith("]")) {
-    return value
-      .slice(1, -1)
-      .split(",")
+    return splitList(value.slice(1, -1))
       .map((item) => unquote(item))
       .filter(Boolean);
   }
@@ -278,8 +305,8 @@ export function parseFrontmatter(text: string): Frontmatter {
 
 function toGlobList(value: FrontmatterValue | undefined): string[] {
   if (value === undefined || typeof value === "boolean") return [];
-  const list = Array.isArray(value) ? value : value.split(",");
-  return list.map((g) => g.trim()).filter((g) => g.length > 0 && g !== "*" && g !== "**" && g !== "**/*");
+  const list = Array.isArray(value) ? value : splitList(value);
+  return list.map((g) => unquote(g)).filter((g) => g.length > 0 && g !== "*" && g !== "**" && g !== "**/*");
 }
 
 // ---------------------------------------------------------------------------
@@ -338,15 +365,36 @@ function splitSentences(paragraph: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Sections that describe the project (how to build it, where things live)
+ * rather than constrain the code. Their bullets are mostly reference notes
+ * such as "`npm test` - run the tests" or "`src/api/` holds the handlers".
+ */
+const DESCRIPTIVE_SECTION =
+  /\b(commands?|scripts|(project|directory|folder|file|repo|repository|codebase) (structure|layout|overview|organi[sz]ation)|architecture|overview|tech(nology)? stack|getting started|quick ?start|set ?up|installation|installing|prerequisites|(key|important) files|entry points?|links|resources|references|background|introduction)\b/i;
+/** ...unless the heading says the section holds rules ("Architecture rules"). */
+const PRESCRIPTIVE_SECTION = /\b(rules?|guidelines?|conventions?|standards?|principles|constraints|requirements|practices|style|dos?|don'?ts?)\b/i;
+
+/** Wording that marks a reference-looking bullet as a rule after all. */
+const RULE_WORDING = /\b(not|no|cannot|can't|forbidden|banned|allowed|needs?|all|every|instead)\b/i;
+
+/** Directive language outside code spans: the "use" in "`use-client`" does not make a rule. */
+function hasRuleWording(text: string): boolean {
+  const prose = text.replace(/`[^`]*`/g, " ");
+  return DIRECTIVE.test(prose) || RULE_WORDING.test(prose);
+}
+
+type BulletCandidate = Candidate & { dropped?: boolean; reference?: boolean };
+
 interface BulletFrame {
   indent: number;
   text: string;
-  candidate: Candidate & { dropped?: boolean };
+  candidate: BulletCandidate;
 }
 
 /** Extracts atomic rule candidates from Markdown / plain text. */
 export function extractMarkdownRules(body: string, lineOffset: number, strict: boolean): Candidate[] {
-  const out: Array<Candidate & { dropped?: boolean }> = [];
+  const out: BulletCandidate[] = [];
   const lines = body.split(/\r?\n/);
   const headings: Array<{ level: number; text: string }> = [];
   const bulletStack: BulletFrame[] = [];
@@ -356,6 +404,15 @@ export function extractMarkdownRules(body: string, lineOffset: number, strict: b
   let bullet: { text: string; line: number; parent?: BulletFrame; indent: number } | null = null;
 
   const sectionName = () => (headings.length ? headings.map((h) => h.text).join(" > ") : undefined);
+  /** The nearest heading that says what kind of section this is decides. */
+  const inDescriptiveSection = () => {
+    for (let i = headings.length - 1; i >= 0; i--) {
+      const text = (headings[i] as { text: string }).text;
+      if (PRESCRIPTIVE_SECTION.test(text)) return false;
+      if (DESCRIPTIVE_SECTION.test(text)) return true;
+    }
+    return false;
+  };
 
   const flushParagraph = () => {
     if (!paragraph) return;
@@ -377,7 +434,10 @@ export function extractMarkdownRules(body: string, lineOffset: number, strict: b
     const text = cleanMarkdown(bullet.text);
     const parentText = bullet.parent?.text.replace(/:$/, "").trim();
     const full = parentText && bullet.parent?.text.endsWith(":") ? `${parentText}: ${text}` : text;
-    const candidate: Candidate & { dropped?: boolean } = { text: full, line: bullet.line, section: sectionName() };
+    // A bullet shaped like a glossary entry ("`npm test` - ...") or sitting in a descriptive section is a
+    // reference note unless it is worded as a rule.
+    const reference = (/^`[^`]+`\s*(?:[-–—:(]|$)/.test(text) || inDescriptiveSection()) && !hasRuleWording(full);
+    const candidate: BulletCandidate = { text: full, line: bullet.line, section: sectionName(), ...(reference ? { reference } : {}) };
     if (bullet.parent?.text.endsWith(":")) bullet.parent.candidate.dropped = true;
     out.push(candidate);
     bulletStack.push({ indent: bullet.indent, text, candidate });
@@ -463,8 +523,9 @@ export function extractMarkdownRules(body: string, lineOffset: number, strict: b
   return out
     .filter((c) => !c.dropped)
     .filter((c) => !(c.text.endsWith(":") && c.text.length < 80))
+    .filter((c) => !c.reference)
     .filter((c) => isAcceptable(c.text, strict))
-    .map(({ dropped: _dropped, ...rest }) => rest);
+    .map(({ dropped: _dropped, reference: _reference, ...rest }) => rest);
 }
 
 const JSON_TEXT_KEYS = new Set([
@@ -519,7 +580,7 @@ export function extractJsonRules(raw: string): Candidate[] {
       for (const [key, value] of entries) {
         const lower = key.toLowerCase();
         if (JSON_GLOB_KEYS.has(lower)) {
-          const list = Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : typeof value === "string" ? value.split(",") : [];
+          const list = Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : typeof value === "string" ? splitList(value) : [];
           const cleaned = list.map((g) => g.trim()).filter(Boolean);
           if (cleaned.length) localGlobs = cleaned;
         } else if (JSON_CATEGORY_KEYS.has(lower)) {
@@ -547,6 +608,8 @@ interface SourceCandidate {
   relPath: string;
   kind: RuleSourceKind;
   strict: boolean;
+  /** Found by a search of every folder (or by following a pointer), not at one of the known rule locations. */
+  searched?: boolean;
 }
 
 function toPosix(p: string): string {
@@ -585,7 +648,7 @@ async function autoDiscover(repoRoot: string): Promise<SourceCandidate[]> {
     const matches = (await globFiles(repoRoot, pattern)).sort();
     for (const match of matches) {
       const key = match.toLowerCase();
-      if (!seen.has(key)) seen.set(key, { relPath: match, kind, strict: strict ?? false });
+      if (!seen.has(key)) seen.set(key, { relPath: match, kind, strict: strict ?? false, searched: pattern.startsWith("**/") });
     }
   }
   return [...seen.values()];
@@ -630,7 +693,7 @@ async function followPointers(repoRoot: string, sources: SourceCandidate[]): Pro
         }
         for (const file of files.slice(0, MAX_POINTER_FILES)) {
           const key = file.toLowerCase();
-          if (!out.has(key)) out.set(key, { relPath: file, kind: "docs", strict: false });
+          if (!out.has(key)) out.set(key, { relPath: file, kind: "docs", strict: false, searched: true });
         }
       }
     }
@@ -682,21 +745,24 @@ async function resolveCustomPaths(
 }
 
 /**
- * Removes auto-discovered files that git ignores (virtualenvs, vendored
- * packages, build output), so third-party AGENTS.md / CLAUDE.md files are
- * never mistaken for the repository's own rules.
+ * Removes files found by searching every folder that git ignores (virtualenvs,
+ * vendored packages, build output), so third-party AGENTS.md / CLAUDE.md files
+ * are never mistaken for the repository's own rules. Files at the known rule
+ * locations (root CLAUDE.md, .cursor/rules, ...) are kept even when ignored:
+ * people often keep their personal rule files out of git on purpose.
  */
 async function dropGitIgnored(
   repoRoot: string,
   candidates: SourceCandidate[],
   skipped: SkippedRuleSource[],
 ): Promise<SourceCandidate[]> {
-  if (!candidates.length) return candidates;
+  const searched = candidates.filter((c) => c.searched);
+  if (!searched.length) return candidates;
   let ignored: Set<string>;
   try {
     // Exit code 1 means "none of the paths are ignored".
     const out = await runGit(repoRoot, ["check-ignore", "-z", "--stdin"], {
-      input: `${candidates.map((c) => c.relPath).join("\0")}\0`,
+      input: `${searched.map((c) => c.relPath).join("\0")}\0`,
       okExitCodes: [0, 1],
     });
     ignored = new Set(out.split("\0").filter(Boolean));
@@ -705,7 +771,7 @@ async function dropGitIgnored(
     return candidates;
   }
   return candidates.filter((c) => {
-    if (!ignored.has(c.relPath)) return true;
+    if (!c.searched || !ignored.has(c.relPath)) return true;
     skipped.push({ path: c.relPath, reason: "ignored by .gitignore" });
     return false;
   });

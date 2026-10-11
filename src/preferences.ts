@@ -13,7 +13,7 @@ export interface Preferences {
   reportDir: string;
   /** Extra rule files, folders or globs, relative to the repository root. */
   customRulePaths: string[];
-  /** Base branch used by scope "branch". */
+  /** Base branch used by scope "branch"; empty = the repository's default branch, detected at audit time. */
   branch: string;
 }
 
@@ -21,7 +21,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   report: process.env.MCP_REPO_AUDITOR_REPORT?.trim().toLowerCase() === "html" ? "html" : "markdown",
   reportDir: process.env.MCP_REPO_AUDITOR_REPORT_DIR?.trim() ?? "",
   customRulePaths: [],
-  branch: "main",
+  branch: "",
 };
 
 /** The questions asked before a repository's first audit. Shared by the form and the chat fallback. */
@@ -42,7 +42,7 @@ export const SETUP_QUESTIONS = [
   },
   {
     key: "branch",
-    question: 'Which base branch should branch audits compare against? (blank = "main")',
+    question: "Which base branch should branch audits compare against? (blank = the repository's default branch, found automatically)",
   },
 ] as const;
 

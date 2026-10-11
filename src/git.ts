@@ -11,6 +11,7 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import picomatch from "picomatch";
 import { logger } from "./logger.js";
 import type {
   ChangedFile,
@@ -30,12 +31,12 @@ function envInt(name: string, fallback: number): number {
 }
 
 export const LIMITS = {
-  /** Max diff lines (all types) emitted per file. */
-  maxLinesPerFile: envInt("MCP_REPO_AUDITOR_MAX_LINES_PER_FILE", 1500),
-  /** Max diff lines emitted across all files. */
-  maxTotalLines: envInt("MCP_REPO_AUDITOR_MAX_TOTAL_LINES", 6000),
-  /** Max number of changed files reported. */
-  maxFiles: envInt("MCP_REPO_AUDITOR_MAX_FILES", 300),
+  /**
+   * Target size of one tool result, in characters. Clients cap tool results
+   * (Claude Code at 25,000 tokens by default), so a larger change is audited
+   * in several parts of about this size.
+   */
+  maxPayloadChars: envInt("MCP_REPO_AUDITOR_MAX_CHARS", 64_000),
   /** Max size of an untracked file read from disk. */
   maxUntrackedBytes: envInt("MCP_REPO_AUDITOR_MAX_UNTRACKED_BYTES", 512 * 1024),
   /** git command timeout. */
@@ -143,7 +144,15 @@ export async function resolveRepoRoot(startDir: string): Promise<string> {
     return path.resolve(out.trim());
   } catch (error) {
     if (error instanceof GitError && error.exitCode === null) throw error;
-    throw new Error(`Not inside a git repository: ${startDir}`);
+    const detail = error instanceof GitError ? error.stderr.trim() : "";
+    if (!detail || /not a git repository/i.test(detail)) {
+      throw new Error(
+        `Not inside a git repository: ${startDir}. Call again with repoPath set to the absolute path of the repository to audit ` +
+          "(ask the user if you do not know it), or set MCP_REPO_AUDITOR_ROOT in the server's config.",
+      );
+    }
+    // Anything else (e.g. git's "dubious ownership" refusal, a broken config) is not a wrong folder: pass git's own words on.
+    throw new Error(`git could not open the repository at ${startDir}: ${detail}`);
   }
 }
 
@@ -164,10 +173,63 @@ async function emptyTreeId(repoRoot: string): Promise<string> {
 
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._\/@{}~^+-]*$/;
 
-/** Validates a user-supplied branch/ref name and resolves it to an existing commit-ish. */
+async function refExists(repoRoot: string, ref: string): Promise<boolean> {
+  try {
+    await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const COMMON_DEFAULT_BRANCHES = ["main", "master", "develop", "trunk"];
+
+/**
+ * The repository's default branch: what origin/HEAD points at, otherwise the
+ * first conventional name that exists. A local branch wins over origin/<name>.
+ */
+async function detectDefaultBranch(repoRoot: string): Promise<string | undefined> {
+  const names = [...COMMON_DEFAULT_BRANCHES];
+  try {
+    const head = (await runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])).trim();
+    if (head.startsWith("origin/")) names.unshift(head.slice("origin/".length));
+  } catch {
+    // No origin/HEAD (no remote, or never set): fall back to the conventional names.
+  }
+  for (const name of names) {
+    for (const ref of [name, `origin/${name}`]) {
+      if (await refExists(repoRoot, ref)) return ref;
+    }
+  }
+  return undefined;
+}
+
+/** Up to 15 branch names, for error messages. */
+async function listBranches(repoRoot: string): Promise<string> {
+  try {
+    const out = await runGit(repoRoot, ["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"]);
+    const names = out.split("\n").map((n) => n.trim()).filter((n) => n && n !== "origin" && !n.endsWith("/HEAD"));
+    if (!names.length) return "";
+    return ` Branches here: ${names.slice(0, 15).join(", ")}${names.length > 15 ? ", …" : ""}.`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Resolves the base for a branch audit to an existing commit-ish. An empty
+ * `branch` means "the repository's default branch", which is detected.
+ */
 export async function resolveBaseRef(repoRoot: string, branch: string): Promise<string> {
   const candidate = branch.trim();
-  if (!candidate || !SAFE_REF.test(candidate) || candidate.includes("..")) {
+  if (!candidate) {
+    const detected = await detectDefaultBranch(repoRoot);
+    if (detected) return detected;
+    throw new Error(
+      `Could not work out which branch to compare against. Ask the user and pass it as "branch".${await listBranches(repoRoot)}`,
+    );
+  }
+  if (!SAFE_REF.test(candidate) || candidate.includes("..")) {
     throw new Error(
       `Invalid branch name "${branch}". Use a plain ref such as "main", "origin/main" or a commit SHA.`,
     );
@@ -177,15 +239,13 @@ export async function resolveBaseRef(repoRoot: string, branch: string): Promise<
   if (!candidate.startsWith("origin/")) candidates.push(`origin/${candidate}`);
 
   for (const ref of candidates) {
-    try {
-      await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
-      return ref;
-    } catch {
-      // try next candidate
-    }
+    if (await refExists(repoRoot, ref)) return ref;
   }
+  const detected = await detectDefaultBranch(repoRoot);
   throw new Error(
-    `Base branch "${candidate}" not found locally or as origin/${candidate}. Fetch it first (git fetch origin ${candidate}).`,
+    `Base branch "${candidate}" not found locally or as origin/${candidate}.` +
+      (detected ? ` This repository's default branch looks like "${detected}"; call again with that as "branch" if it is what the user means.` : "") +
+      (await listBranches(repoRoot)),
   );
 }
 
@@ -436,7 +496,7 @@ export function parseUnifiedDiff(diffText: string): ChangedFile[] {
 }
 
 // ---------------------------------------------------------------------------
-// Noise filtering and budgeting
+// Noise filtering and path selection
 // ---------------------------------------------------------------------------
 
 const LOCKFILES = new Set([
@@ -462,51 +522,32 @@ function skipReasonFor(file: ChangedFile): string | undefined {
   return undefined;
 }
 
-/** Drops noisy hunks and enforces per-file / total line budgets. */
-function applyBudgets(files: ChangedFile[], warnings: string[]): ChangedFile[] {
-  let result = files;
-  if (result.length > LIMITS.maxFiles) {
-    warnings.push(
-      `Diff touches ${files.length} files; only the first ${LIMITS.maxFiles} are reported (MCP_REPO_AUDITOR_MAX_FILES).`,
-    );
-    result = result.slice(0, LIMITS.maxFiles);
-  }
-
-  let totalBudget = LIMITS.maxTotalLines;
-  for (const file of result) {
+/** Marks the files that are never audited (deleted, binary, lockfiles, generated). Nothing else is dropped. */
+function markSkipped(files: ChangedFile[]): void {
+  for (const file of files) {
     const reason = skipReasonFor(file);
-    if (reason) {
-      file.skippedReason = reason;
-      file.hunks = [];
-      continue;
-    }
-    if (totalBudget <= 0) {
-      file.skippedReason = "global diff line budget exhausted (MCP_REPO_AUDITOR_MAX_TOTAL_LINES)";
-      file.hunks = [];
-      continue;
-    }
-
-    let fileBudget = Math.min(LIMITS.maxLinesPerFile, totalBudget);
-    const kept: DiffHunk[] = [];
-    for (const hunk of file.hunks) {
-      if (fileBudget <= 0) {
-        file.truncated = true;
-        break;
-      }
-      if (hunk.lines.length <= fileBudget) {
-        kept.push(hunk);
-        fileBudget -= hunk.lines.length;
-        totalBudget -= hunk.lines.length;
-      } else {
-        kept.push({ ...hunk, lines: hunk.lines.slice(0, fileBudget) });
-        totalBudget -= fileBudget;
-        fileBudget = 0;
-        file.truncated = true;
-      }
-    }
-    file.hunks = kept;
+    if (!reason) continue;
+    file.skippedReason = reason;
+    file.hunks = [];
   }
-  return result;
+}
+
+/**
+ * Test for the user's `paths` selection. Each entry is a file, a folder or a
+ * glob, relative to the repository root (absolute paths inside it also work).
+ */
+function pathSelector(repoRoot: string, paths: string[]): ((filePath: string) => boolean) | undefined {
+  const tests: Array<(filePath: string) => boolean> = [];
+  for (const raw of paths) {
+    let entry = raw.trim();
+    if (!entry) continue;
+    if (path.isAbsolute(entry)) entry = path.relative(repoRoot, entry);
+    entry = entry.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    if (!entry || entry === ".") return undefined;
+    const isGlob = picomatch(entry, { dot: true });
+    tests.push((filePath) => filePath === entry || filePath.startsWith(`${entry}/`) || isGlob(filePath));
+  }
+  return tests.length ? (filePath) => tests.some((test) => test(filePath)) : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +625,26 @@ async function untrackedFiles(repoRoot: string, warnings: string[]): Promise<Cha
   return files;
 }
 
+/** Number of files with unstaged or untracked changes; explains an empty staged audit. */
+async function countUnstagedFiles(repoRoot: string): Promise<number> {
+  try {
+    const out = await runGit(repoRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const entries = out.split("\0");
+    let count = 0;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (!entry) continue;
+      // Renames and copies are followed by a second field holding the old path.
+      if (entry[0] === "R" || entry[0] === "C") i += 1;
+      count += 1;
+    }
+    return count;
+  } catch (error) {
+    logger.warn(`git status failed: ${(error as Error).message}`);
+    return 0;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -600,7 +661,7 @@ const DIFF_FLAGS = [
   "--submodule=short",
 ];
 
-export async function getDiff(repoRoot: string, scope: DiffScope, branch: string): Promise<DiffResult> {
+export async function getDiff(repoRoot: string, scope: DiffScope, branch: string, paths: string[] = []): Promise<DiffResult> {
   const warnings: string[] = [];
   const headExists = await hasHead(repoRoot);
   let args: string[];
@@ -645,7 +706,17 @@ export async function getDiff(repoRoot: string, scope: DiffScope, branch: string
   }
 
   files.sort((a, b) => a.path.localeCompare(b.path));
-  files = applyBudgets(files, warnings);
 
-  return { repoRoot, scope, comparison, files, warnings };
+  // "Audit my changes" before any `git add` is common; say what is waiting instead of just "nothing".
+  const unstagedFiles = scope === "staged" && files.length === 0 ? await countUnstagedFiles(repoRoot) : 0;
+
+  const selected = pathSelector(repoRoot, paths);
+  if (selected) {
+    const all = files.length;
+    files = files.filter((f) => selected(f.path));
+    if (!files.length && all) warnings.push(`None of the ${all} changed file(s) match the requested paths: ${paths.join(", ")}.`);
+  }
+  markSkipped(files);
+
+  return { repoRoot, scope, comparison, files, warnings, ...(unstagedFiles ? { unstagedFiles } : {}) };
 }

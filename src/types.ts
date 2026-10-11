@@ -55,10 +55,8 @@ export interface ChangedFile {
   /** New-file line numbers of every added line. */
   addedLineNumbers: number[];
   hunks: DiffHunk[];
-  /** Set when hunks were omitted (lockfile, generated, binary, too large). */
+  /** Set when the file is not audited at all (deleted, binary, lockfile, generated, unreadable). */
   skippedReason?: string;
-  /** True when hunks were cut to stay within the per-file line budget. */
-  truncated?: boolean;
 }
 
 export interface DiffResult {
@@ -68,6 +66,8 @@ export interface DiffResult {
   comparison: string;
   files: ChangedFile[];
   warnings: string[];
+  /** Set when a staged audit found nothing: how many files have unstaged or untracked changes. */
+  unstagedFiles?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +190,8 @@ export interface AuditInput {
   scope: DiffScope;
   branch: string;
   customRulePaths: string[];
+  /** Limit the audit to these files, folders or globs (relative to the repository root). Empty = everything. */
+  paths: string[];
   repoPath?: string;
   /** "html" asks the host LLM to send its verdicts to the report tool instead of printing a matrix. */
   report?: "markdown" | "html";
@@ -213,7 +215,8 @@ export interface PayloadChangedFile {
   deletions: number;
   added_line_numbers: string;
   skipped_reason?: string;
-  truncated?: boolean;
+  /** Set when only some of the file's changed lines are in this part, e.g. "new-file lines 1-812; the rest of this file is in parts 2, 3". */
+  shown_lines?: string;
   hunks: PayloadHunk[];
 }
 
@@ -256,7 +259,22 @@ export interface AuditPayload {
     };
     rule_sources: Array<{ path: string; kind: RuleSourceKind; rules: number }>;
     skipped_rule_sources: SkippedRuleSource[];
+    /** Present when a staged audit found nothing staged: files with unstaged or new changes. */
+    unstaged_files?: number;
     warnings: string[];
+    /** Which part of the audit this result is. A change that fits in one result has a single part. */
+    part: {
+      number: number;
+      total: number;
+      /** Files (or pieces of files) in this part. */
+      files: string[];
+      /** The next part that has not been handed out yet, or null when this is the last one. */
+      next: number | null;
+      /** Parts already handed out in this session, including this one. */
+      served: number[];
+    };
+    /** The `paths` selection this audit was limited to, when there was one. */
+    paths?: string[];
     /** The preferences this audit ran with, and where they came from. */
     preferences?: {
       report: "markdown" | "html";
