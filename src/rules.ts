@@ -232,14 +232,41 @@ function unquote(value: string): string {
   return v;
 }
 
+/**
+ * Splits a comma-separated list, leaving commas inside braces, brackets and
+ * quotes alone, so a glob such as "src/*.{ts,tsx}" stays in one piece.
+ */
+export function splitList(value: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote = "";
+  let current = "";
+  for (const ch of value) {
+    if (quote) {
+      if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === "{" || ch === "[") {
+      depth += 1;
+    } else if ((ch === "}" || ch === "]") && depth > 0) {
+      depth -= 1;
+    } else if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
 function parseScalar(raw: string): FrontmatterValue {
   const value = raw.trim();
   if (value === "true") return true;
   if (value === "false") return false;
   if (value.startsWith("[") && value.endsWith("]")) {
-    return value
-      .slice(1, -1)
-      .split(",")
+    return splitList(value.slice(1, -1))
       .map((item) => unquote(item))
       .filter(Boolean);
   }
@@ -278,8 +305,8 @@ export function parseFrontmatter(text: string): Frontmatter {
 
 function toGlobList(value: FrontmatterValue | undefined): string[] {
   if (value === undefined || typeof value === "boolean") return [];
-  const list = Array.isArray(value) ? value : value.split(",");
-  return list.map((g) => g.trim()).filter((g) => g.length > 0 && g !== "*" && g !== "**" && g !== "**/*");
+  const list = Array.isArray(value) ? value : splitList(value);
+  return list.map((g) => unquote(g)).filter((g) => g.length > 0 && g !== "*" && g !== "**" && g !== "**/*");
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +546,7 @@ export function extractJsonRules(raw: string): Candidate[] {
       for (const [key, value] of entries) {
         const lower = key.toLowerCase();
         if (JSON_GLOB_KEYS.has(lower)) {
-          const list = Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : typeof value === "string" ? value.split(",") : [];
+          const list = Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : typeof value === "string" ? splitList(value) : [];
           const cleaned = list.map((g) => g.trim()).filter(Boolean);
           if (cleaned.length) localGlobs = cleaned;
         } else if (JSON_CATEGORY_KEYS.has(lower)) {

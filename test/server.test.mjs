@@ -123,3 +123,28 @@ test("HTML report is written from the findings and counts N/A itself", async () 
     await client.close();
   }
 });
+
+test("rules scoped with brace globs are applied to matching files", async () => {
+  const repo = makeRepo({
+    ".github/instructions/ts.instructions.md": '---\napplyTo: "**/*.{ts,tsx}"\n---\n- Always declare explicit return types on exported functions.\n',
+    ".cursor/rules/brace.mdc": "---\ndescription: TS conventions\nglobs: src/**/*.{ts,tsx}\n---\n- Never call console.log in committed code.\n",
+    ".cursor/rules/list.mdc": "---\nglobs: src/**/*.ts, src/**/*.tsx\n---\n- Wrap every async route handler in try/catch.\n",
+    ".cursor/rules/array.mdc": '---\nglobs: ["lib/**/*.{js,mjs}", "src/**/*.ts"]\n---\n- Prefer early returns over nested conditionals.\n',
+    ".cursor/rules/python.mdc": "---\nglobs: **/*.{py,pyi}\n---\n- Always add type hints to public functions.\n",
+    "src/api/users.ts": "export const a = 1;\n",
+  });
+  write(repo, { "src/api/users.ts": "export const a = 1;\nexport const b = 2;\n" });
+  const client = await connect(repo);
+  try {
+    const { json } = await audit(client, { scope: "working" });
+    const texts = rulesFor(json, /users\.ts$/);
+    assert.deepEqual(texts.sort(), [
+      "Always declare explicit return types on exported functions.",
+      "Never call console.log in committed code.",
+      "Prefer early returns over nested conditionals.",
+      "Wrap every async route handler in try/catch.",
+    ]);
+  } finally {
+    await client.close();
+  }
+});
